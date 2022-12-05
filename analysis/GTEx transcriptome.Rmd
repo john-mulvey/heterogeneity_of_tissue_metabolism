@@ -1,0 +1,808 @@
+---
+title: "GTEx data normalisation"
+author: "John Mulvey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: flatly
+    highlight: tango
+  html_document:
+    toc: yes
+    df_print: paged
+---
+
+Marleen's project involves comparing the expression of components of metabolic pathways in different organs, to help interpretation of the fact the metabolism is very different between different tissues (here skeletal muscle, heart and kidney since we have metabolite A-V difference data between the organs). There a a couple of datasets containing both proteome and transcriptome but not with coverage of these 3 tissues. Hence we shall use data from the GTEx resource and then cross correlate the transcript data against (older) MS proteomics datasets for verification.
+
+Normalisation between different tissues is challenging, particularly for sequencing data where high abundance transcripts end up contributing an overrepresetnative number of reads. TMM ("trimmed mean of M values") normalisation was developed for exactly this purpose:
+
+Robinson, M.D., Oshlack, A. A scaling normalization method for differential expression analysis of RNA-seq data. Genome Biol 11, R25 (2010). https://doi.org/10.1186/gb-2010-11-3-r25
+
+GTEx data is expressed as TPM and median normalised, which is less appropriate for our use case. Here I import a Gene TPM dataset downloaded from GTEx and use edgeR for TMM normalisation (i.e. effectively an adjustment in library size???)
+GTEx V8 dbGaP Accession phs000424.v8.p2
+
+Info on the GTEx data processing pipeline is available here: https://gtexportal.org/home/documentationPage#staticTextAnalysisMethods
+
+In summary:
+
+RNA-seq Alignment
+
+Alignment to the human reference genome GRCh38/hg38 was performed using STAR v2.5.3a, based on the GENCODE v26 annotation. Unaligned reads were kept in the final BAM file. Among multi-mapping reads, one read is flagged as the primary alignment by STAR. The alignment pipeline is available at https://github.com/broadinstitute/gtex-pipeline/tree/master/rnaseq 
+
+
+GTEx dbGaP Release	V8 // GENCODE version	v26
+
+Collapsed Gene Model
+
+Gene-level expression quantification was based on the GENCODE 26 annotation, collapsed to a single transcript model for each gene using a custom isoform collapsing procedure, comprising the following steps:
+
+Exons associated with transcripts annotated as “retained_intron” and “read_through” were excluded.
+Exon intervals overlapping within a gene were merged.
+The intersections of exon intervals overlapping between genes were excluded.
+The remaining exon intervals were mapped to their respective gene identifier and stored in GTF format.
+Code for generating the collapsed model is available at https://github.com/broadinstitute/gtex-pipeline/tree/master/gene_model . 
+
+Quantification
+
+Gene-level quantifications: read counts and TPM values were produced with RNA-SeQC v1.1.9 (DeLuca et al., Bioinformatics, 2012 ), using the following read-level filters:
+
+Reads were uniquely mapped (corresponding to a mapping quality of 255 for START BAMs).
+Reads were aligned in proper pairs.
+The read alignment distance was <=6 (i.e., alignments must not contain more than six non-reference bases).
+Reads were fully contained within exon boundaries. Reads overlapping introns were not counted.
+These filters were applied using the “-strictMode” flag in RNA-SeQC.
+
+The TPM values that are downloadable have not been normalized or corrected for any covariates.
+
+
+#Load packagges
+```{r}
+library(tidyverse)
+library(data.table)
+library(edgeR)
+library(biomaRt)
+library(readxl)
+```
+
+
+# read data
+## sample_meta
+```{r}
+# make readable tissue types
+sample_meta = read.delim("../data/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt") %>%
+  mutate(tissue = str_replace_all(SMTSD, "[^[:alnum:]]+", "_") %>%
+           str_replace("[:punct:]$", "") %>%
+           as.factor())
+
+tissue_types = levels(sample_meta$tissue)
+
+tissues_of_interest = c("Kidney_Cortex", "Kidney_Medulla", "Muscle_Skeletal", "Heart_Left_Ventricle", "Heart_Atrial_Appendage", "Liver")
+
+# pull IDs of relevant samples
+selected_sample_id = sample_meta %>%
+  filter(tissue %in% tissues_of_interest) %>%
+  pull(SAMPID)
+```
+
+
+# Read data: gene read counts
+Base read.delim and tidyverse read_delim are unable to deal with the size of this dataset - producing out of memory errors, but data.table works 
+## transcript
+```{r}
+# define subset of columns to load
+columns_to_load = read_delim("../data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gct", skip=2, n_max = 1) %>%
+  dplyr::select(any_of(selected_sample_id))
+
+#data.table fread as another alternative
+gene_reads_matrix = data.table::fread("../data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gct", skip=2, select = c("Name", "Description", colnames(columns_to_load ))) %>%
+  dplyr::select(-Description) %>%
+  column_to_rownames("Name")
+```
+
+
+# Retrive gene information from biomart
+N.B bu taksing the diff between start position and end position we ignore splicing - since tpm divides gene lenth by 1*10^6 this effect should be small and so adequate for our purposes here
+```{r}
+#use biomart to get gene legnth
+ensg_genes = rownames(gene_reads_matrix)
+ensg_genes_clean = str_extract(ensg_genes, "[^\\.]+")
+
+mart <- useMart("ensembl", dataset="hsapiens_gene_ensembl")
+#possible_attributes = listAttributes(mart = mart)
+
+human_gene_info = biomaRt::getBM(mart = mart, attributes = c("ensembl_gene_id", "hgnc_symbol", "start_position", "end_position")) %>%
+  mutate(gene_length = end_position - start_position) %>% 
+  filter(ensembl_gene_id %in% ensg_genes_clean) %>%
+  filter(!duplicated(ensembl_gene_id))
+
+# construct gene info dataframe
+gene_info = gene_reads_matrix %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  dplyr::select("GTEx_ENSG") %>%
+  mutate(ensembl_gene_id = str_extract(GTEx_ENSG, "[^\\.]+")) %>%
+  left_join(human_gene_info, by = "ensembl_gene_id")
+
+# check for duplicate genes
+# n_occur <- data.frame(table(gene_info$GTEx_ENSG))
+# n_occur[n_occur$Freq > 1,]
+# 
+# n_occur <- data.frame(table(human_gene_info$ensembl_gene_id))
+# n_occur[n_occur$Freq > 1,]
+```
+
+
+# Compare normalisation
+## TMM normalise, individual samples
+```{r}
+# calculate TMM normalization factors
+gene_reads_matrix_tmm =  calcNormFactors(gene_reads_matrix, method = "TMM")
+
+#normalised counts per million
+gene_cpm_tmm = cpm(gene_reads_matrix_tmm, log=FALSE)
+```
+
+
+## TMM normalise by group
+i.e. collaspe groups into just one representative sample
+```{r}
+groups = sample_meta %>%
+  filter(SAMPID %in% colnames(gene_reads_matrix)) %>%
+  pull(tissue) %>%
+  droplevels()
+
+# Creates a DGEList object  - the edgeR class
+dgelist = DGEList(counts = gene_reads_matrix,
+                    group = groups,
+                  genes = gene_info)
+
+# filter lowly-expressed genes:
+dgelist_filtered = dgelist[filterByExpr(dgelist, group=groups), ,keep.lib.sizes=FALSE]
+
+#TMM normalisation
+dgelist_tmm = calcNormFactors(dgelist_filtered, method = "TMM")
+
+# counts per million
+gene_cpm_grouped_tmm = cpmByGroup(dgelist_tmm, log=FALSE, group = groups)
+gene_cpm_grouped_naive = cpmByGroup(dgelist_filtered, log=FALSE, group = groups)
+```
+
+
+## TPM normalisation
+```{r}
+#TMM
+rpkm_grouped_tmm = edgeR::rpkmByGroup(dgelist_tmm, log=F, gene.length = dgelist_tmm$genes$gene_length) %>%
+  na.omit()
+tpm_grouped_tmm = t(t(rpkm_grouped_tmm) / colSums(rpkm_grouped_tmm) ) * 1e6
+
+#naive
+rpkm_grouped_naive = edgeR::rpkmByGroup(dgelist_filtered, log=F, gene.length = dgelist_filtered$genes$gene_length) %>%
+  na.omit()
+tpm_grouped_naive = t(t(rpkm_grouped_naive) / colSums(rpkm_grouped_naive) ) * 1e6
+
+#log2
+log_tpm_grouped_tmm = log2(tpm_grouped_tmm + 0.001)
+log_tpm_grouped_naive = log2(tpm_grouped_naive + 0.001)
+```
+
+
+## Plot comparison of 2 tissues: kidney cortex vs skeletalmuscle
+```{r}
+#to add: select gnes expressed in both samples???
+log_tpm_grouped_tmm_toi = log_tpm_grouped_tmm[,c("Kidney_-_Cortex", "Muscle_-_Skeletal")]
+log_tpm_grouped_naive_toi = log_tpm_grouped_naive[,c("Kidney_-_Cortex", "Muscle_-_Skeletal")]
+
+#MA plot using smoothScatter function
+par(mfrow=c(1,2))
+for(i in c("log_tpm_grouped_tmm_toi", "log_tpm_grouped_naive_toi")){
+  g1 <- get(i)[,1]
+  g2 <- get(i)[,2]
+  smoothScatter(x = 0.5*(g1+g2), # average expr
+                y = g1-g2, # fold change
+                xlab = "average log expression",
+                ylab = "log fold change",
+                main = i)
+                #ylim=c(-6,6))
+  abline(h=0, col="red")
+  abline(h=log2(2), col="red", lty=2)
+  abline(h=-log2(2), col="red", lty=2)
+}
+title("Kidney cortex vs skeletal muscle", line = -1, outer = TRUE, cex.main = 0.75)
+```
+
+
+### Plot distribution of log2kidney-log2skeletal muscle
+```{r}
+```
+
+
+## Write data for Marleen (all genes)
+REminder: we only loaded the tissue types that we had a priori interest in
+```{r}
+tpm_grouped_tmm %>%
+  na.omit() %>%
+  as.data.frame() %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(gene_info, by = "GTEx_ENSG") %>%
+  dplyr::select(-start_position, -end_position, -gene_length, -
+GTEx_ENSG) %>%
+  write.csv("../output/average_log_tpm_grouped_by_tissue.csv")
+```
+
+
+## Write data for Marleen (predefined genes of interest)
+```{r}
+#updated file from Marleen with a few more genes added
+genes_of_interest = read_excel("../data/MdW Protein list based on metabolic clusters incl transporters 23-05-2022.xlsx", "HumanGem NoDupl") %>%
+  dplyr::rename(ensembl_gene_id = HumanGem_ENSG) %>%
+  dplyr::select(Cluster, ensembl_gene_id)
+
+#ensure correct genes_of_interest is specified below
+marleen_df = tpm_grouped_tmm[,tissues_of_interest] %>%
+  na.omit() %>%
+  as.data.frame() %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(gene_info, by = "GTEx_ENSG") %>%
+  dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG) %>%
+  right_join(genes_of_interest, by = "ensembl_gene_id")
+
+write.csv(marleen_df, "../output/tpm_grouped_by_tissue_specifed_genes_only.csv")
+```
+
+
+# calc ungrouped data for downstream analysis
+```{r}
+#TMM
+rpkm_tmm <- edgeR::rpkm(dgelist_tmm, log=F, gene.length = dgelist_tmm$genes$gene_length) %>%
+  na.omit()
+tpm_tmm <- t(t(rpkm_tmm) / colSums(rpkm_tmm)) * 1e6
+
+#log2
+log_tpm_tmm = log2(tpm_tmm + 0.001)
+
+#display tissue type for all columns
+relevant_sample_meta = sample_meta %>%
+  dplyr::filter(SAMPID %in% colnames(log_tpm_tmm)) %>%
+  mutate(tissue = as.factor(SMTSD))
+
+relevant_sample_meta %>%
+  group_by(SMTSD) %>%
+  count()
+
+#filter for predefined metabolism relevant genes
+log_tpm_tmm_filtered = log_tpm_tmm %>%
+  na.omit() %>%
+  as.data.frame() %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(gene_info, by = "GTEx_ENSG") %>%
+  dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG) %>%
+  right_join(genes_of_interest, by = "ensembl_gene_id") %>%
+  dplyr::select(-ensembl_gene_id, -hgnc_symbol, -Cluster) %>%
+  as.matrix() %>%
+  na.omit()
+
+tpm_tmm_filtered = log_tpm_tmm^2
+```
+
+
+# Correlation plot to assess similarity
+We calculate pairwise pearson correlation between samples to check for any outliers.
+```{r}
+# cor_matrix = cor(log_tpm_tmm_filtered, use = "na.or.complete")
+# 
+# library(corrplot)
+# corrplot(cor_matrix, method="color", type="upper", order="hclust",
+#          tl.col="black", tl.srt=45, tl.cex = 0.5,
+#          is.corr = F)
+```
+
+# PCA
+```{r}
+library(factoextra)
+library(FactoMineR)
+
+res.pca = PCA(t(log_tpm_tmm_filtered), scale.unit=TRUE, ncp=5, graph=F)
+
+fviz_screeplot(res.pca, ncp=10,
+               ggtheme = theme_gray())
+
+fviz_pca_ind(res.pca,
+             axes = c(1,2),
+             habillage = relevant_sample_meta$tissue,
+             label = "none", #"ind" to show, with optional
+             repel = TRUE,
+             #addEllipses=TRUE, ellipse.level=0.95,
+             legend.title = "Tissue",
+             title = "PC1 vs PC2",
+             invisible="quali",
+             ggtheme = theme_gray())
+
+fviz_pca_ind(res.pca,
+             axes = c(1,3),
+             habillage = relevant_sample_meta$tissue,
+             label = "none", #"ind" to show, with optional
+             repel = TRUE,
+             #addEllipses=TRUE, ellipse.level=0.95,
+             legend.title = "Tissue",
+             title = "PC1 vs PC3",
+             invisible="quali",
+             ggtheme = theme_gray())
+
+#ggplot bar chart of varaibles contributing most to comp2
+```
+
+
+#visulaise batch effect
+Both of these have far too mnay levels to be practically useful
+```{r}
+# fviz_pca_ind(res.pca,
+#              axes = c(1,2),
+#              habillage = as.factor(relevant_sample_meta$SMNABTCH),
+#              label = "none", #"ind" to show, with optional
+#              repel = TRUE,
+#              #addEllipses=TRUE, ellipse.level=0.95,
+#              legend.title = "RNA extraction batch",
+#              title = "PC1 vs PC2",
+#              invisible="quali",
+#              ggtheme = theme_gray()) +
+#   theme(legend.position = "none")
+# 
+# fviz_pca_ind(res.pca,
+#              axes = c(1,2),
+#              habillage = as.factor(relevant_sample_meta$SMGEBTCH),
+#              label = "none", #"ind" to show, with optional
+#              repel = TRUE,
+#              #addEllipses=TRUE, ellipse.level=0.95,
+#              legend.title = "Sequencing batch",
+#              title = "PC1 vs PC2",
+#              invisible="quali",
+#              ggtheme = theme_gray())+
+#   theme(legend.position = "none")
+```
+
+
+# heatmap using top 250 most variable proteins only
+```{r, fig.width = 12, fig.height = 15}
+library(gplots)
+myCol <- colorRampPalette(c("red", "black", "green"))(100)
+
+group.colours = case_when(relevant_sample_meta$tissue  == "Heart - Atrial Appendage" ~ "red",
+          relevant_sample_meta$tissue == "Heart - Left Ventricle" ~ "blue",
+          relevant_sample_meta$tissue == "Kidney - Cortex" ~ "green",
+          relevant_sample_meta$tissue == "Kidney - Medulla" ~ "purple",
+          relevant_sample_meta$tissue == "Muscle - Skeletal" ~ "yellow",
+          relevant_sample_meta$tissue == "Liver" ~ "pink",
+          TRUE ~ "NA")
+
+#ward.D2
+heatmap.2(as.matrix(log_tpm_tmm_filtered),
+   col = myCol,
+   main = "gene wise z score",
+   key = T, lhei = c(1,10),
+   scale = "row",
+   density.info = "none",
+   reorderfun = function(d,w) reorder(d, w, agglo.FUN=mean),
+   trace = "none",
+   cexRow = 0.3,
+   cexCol = 0.6,
+   distfun = function(x) dist(x, method="euclidean"),
+   hclustfun = function(x) hclust(x, method="ward.D2"),
+   #colCol = group.colours,
+   ColSideColors = group.colours,
+   labCol = FALSE
+   )
+
+#ward.D2
+heatmap.2(as.matrix(log_tpm_tmm_filtered),
+   col = myCol,
+   main = "column wise z score",
+   key = T, lhei = c(1,10),
+   scale = "column",
+   density.info = "none",
+   reorderfun = function(d,w) reorder(d, w, agglo.FUN=mean),
+   trace = "none",
+   cexRow = 0.3,
+   cexCol = 0.6,
+   distfun = function(x) dist(x, method="euclidean"),
+   hclustfun = function(x) hclust(x, method="ward.D2"),
+   #colCol = group.colours,
+   ColSideColors = group.colours,
+   labCol = FALSE
+   )
+
+heatmap.2(as.matrix(log_tpm_tmm_filtered),
+   col = myCol,
+   main = "log TPM",
+   key = T, lhei = c(1,10),
+   scale = "none",
+   density.info = "none",
+   reorderfun = function(d,w) reorder(d, w, agglo.FUN=mean),
+   trace = "none",
+   cexRow = 0.3,
+   cexCol = 0.6,
+   distfun = function(x) dist(x, method="euclidean"),
+   hclustfun = function(x) hclust(x, method="ward.D2"),
+   #colCol = group.colours,
+   ColSideColors = group.colours,
+   labCol = FALSE
+   )
+```
+
+
+#batch correction by surrogate varaible analysis
+The below with num.sv method = leek computes an unrealisting large number of svs: 1747. Suggestion is to use be method (what is this?) or other to seprate tissue types and calculate sv's for each of these separately. be method produces 69 surrogate variables
+## surgoate variables
+```{r}
+# library(sva)
+# design = model.matrix(~tissue, data = relevant_sample_meta)
+# design0 = model.matrix(~ 1, data = relevant_sample_meta)
+# n_sv = num.sv(dgelist_tmm$counts, mod = design, method = "be")
+# sv_obj = svaseq(dgelist_tmm$counts, mod = design, mod0 = design0, n.sv = n_sv)
+# design_sv = cbind(design, sv_obj$sv)
+# 
+# # combat_matrix = ComBat_seq(counts = dgelist_tmm$counts, batch = sv_obj$sv, covar_mod = design)
+# # 
+# # combat_matrix = ComBat_seq(counts = dgelist_tmm$counts, batch = sv_obj$sv, covar_mod = design)
+# 
+# #taken from Jaffe lab @ Lieber Institute
+# cleaningY <- function(y, mod, P) {
+#     stopifnot(P <= ncol(mod))
+#     stopifnot("Input matrix is not full rank" = qr(mod)$rank == ncol(mod))
+#     Hat <- solve(t(mod) %*% mod) %*% t(mod)
+#     ## For dealing with NAs
+#     ## https://stackoverflow.com/questions/16535084/matrix-multiplication-with-scattered-na-values
+#     ty <- t(y)
+#     ty[is.na(ty)] <- 0
+#     beta <- (Hat %*% ty)
+#     ## Note that y might still have the NAs, and NA - a number = NA
+#     ## so there's no need to reset the NAs back on cleany
+#     cleany <- y - t(as.matrix(mod[, -c(seq_len(P))]) %*% beta[-seq_len(P), ])
+#     return(cleany)
+# }
+# 
+# cleaned_counts = cleaningY(dgelist_tmm$counts, design_sv, P = 5)
+# cleaned_counts[cleaned_counts < 0] = 0
+
+```
+
+
+## using batch info in metadata
+```{r}
+
+```
+
+
+## calc log TPM for batch corrected data
+```{r}
+gene_length_filtered = dgelist_tmm$counts %>%
+  as.data.frame() %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(gene_info, by = "GTEx_ENSG") %>%
+  pull(gene_length)
+
+#TMM
+rpkm_tmm_clean <- edgeR::rpkm(dgelist_tmm$counts, log=F, gene.length = gene_length_filtered ) %>%
+  na.omit()
+tpm_tmm_clean <- t(t(rpkm_tmm_clean) / colSums(rpkm_tmm_clean) ) * 1e6
+
+#log2
+log_tpm_tmm_clean = log2(tpm_tmm_clean + 1)
+
+
+#filter for predefined metabolism relevant genes
+log_tpm_tmm_filtered_clean = log_tpm_tmm_clean %>%
+  na.omit() %>%
+  as.data.frame() %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(gene_info, by = "GTEx_ENSG") %>%
+  dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG) %>%
+  right_join(genes_of_interest, by = "ensembl_gene_id") %>%
+  dplyr::select(-ensembl_gene_id, -hgnc_symbol, -Cluster) %>%
+  as.matrix() %>%
+  na.omit()
+
+tpm_tmm_filtered_clean = (log_tpm_tmm_filtered_clean^2)-1
+```
+
+
+
+#batch corrected
+##PCA marleen genes
+```{r}
+res_pca_clean = PCA(t(log_tpm_tmm_filtered_clean), scale.unit=TRUE, ncp=5, graph=F)
+
+fviz_screeplot(res_pca_clean, ncp=10,
+               ggtheme = theme_gray())
+
+fviz_pca_ind(res_pca_clean,
+             axes = c(1,2),
+             habillage = relevant_sample_meta$tissue,
+             label = "none", #"ind" to show, with optional
+             repel = TRUE,
+             #addEllipses=TRUE, ellipse.level=0.95,
+             legend.title = "Tissue",
+             title = "PC1 vs PC2",
+             invisible="quali",
+             ggtheme = theme_gray())
+
+fviz_pca_ind(res_pca_clean,
+             axes = c(1,3),
+             habillage = relevant_sample_meta$tissue,
+             label = "none", #"ind" to show, with optional
+             repel = TRUE,
+             #addEllipses=TRUE, ellipse.level=0.95,
+             legend.title = "Tissue",
+             title = "PC1 vs PC3",
+             invisible="quali",
+             ggtheme = theme_gray())
+
+#ggplot bar chart of varaibles contributing most to comp2
+
+
+library(GGally)
+res_pca_clean[["ind"]][["coord"]] %>%
+  as.data.frame() %>%
+  ggpairs(ggplot2::aes(colour=relevant_sample_meta$tissue),
+          lower = list(continuous = wrap("points", size=0.1)),
+          upper = list(continuous = wrap("cor", size = 2)))
+```
+
+
+##PCA all genes
+```{r}
+res_pca_all_genes = PCA(t(log_tpm_tmm), scale.unit=TRUE, ncp=5, graph=F)
+
+fviz_screeplot(res_pca_all_genes, ncp=10,
+               ggtheme = theme_gray())
+
+fviz_pca_ind(res_pca_all_genes,
+             axes = c(1,2),
+             habillage = relevant_sample_meta$tissue,
+             label = "none", #"ind" to show, with optional
+             repel = TRUE,
+             #addEllipses=TRUE, ellipse.level=0.95,
+             legend.title = "Tissue",
+             title = "PC1 vs PC2",
+             invisible="quali",
+             ggtheme = theme_gray())
+
+fviz_pca_ind(res_pca_all_genes,
+             axes = c(1,3),
+             habillage = relevant_sample_meta$tissue,
+             label = "none", #"ind" to show, with optional
+             repel = TRUE,
+             #addEllipses=TRUE, ellipse.level=0.95,
+             legend.title = "Tissue",
+             title = "PC1 vs PC3",
+             invisible="quali",
+             ggtheme = theme_gray())
+
+#ggpairs plot
+res_pca_all_genes[["ind"]][["coord"]] %>%
+  as.data.frame() %>%
+  ggpairs(ggplot2::aes(colour=relevant_sample_meta$tissue),
+          lower = list(continuous = wrap("points", size=0.1)),
+          upper = list(continuous = wrap("cor", size = 2)))
+```
+
+## heatmap
+```{r, fig.width = 12, fig.height = 15}
+#ward.D2
+heatmap.2(as.matrix(log_tpm_tmm_filtered_clean),
+   col = myCol,
+   main = "gene wise z score",
+   key = T, lhei = c(1,10),
+   scale = "row",
+   density.info = "none",
+   reorderfun = function(d,w) reorder(d, w, agglo.FUN=mean),
+   trace = "none",
+   cexRow = 0.3,
+   cexCol = 0.6,
+   distfun = function(x) dist(x, method="euclidean"),
+   hclustfun = function(x) hclust(x, method="ward.D2"),
+   #colCol = group.colours,
+   ColSideColors = group.colours,
+   labCol = FALSE
+   )
+
+legend("left", title = "Tissues",legend=levels(relevant_sample_meta$tissue), 
+       fill=c("red","blue", "green", "purple", "yellow", "pink"), cex=0.8, box.lty=0)
+
+#ward.D2
+heatmap.2(as.matrix(log_tpm_tmm_filtered_clean),
+   col = myCol,
+   main = "column wise z score",
+   key = T, lhei = c(1,10),
+   scale = "column",
+   density.info = "none",
+   reorderfun = function(d,w) reorder(d, w, agglo.FUN=mean),
+   trace = "none",
+   cexRow = 0.3,
+   cexCol = 0.6,
+   distfun = function(x) dist(x, method="euclidean"),
+   hclustfun = function(x) hclust(x, method="ward.D2"),
+   #colCol = group.colours,
+   ColSideColors = group.colours,
+   labCol = FALSE
+   )
+
+#ward.D2
+heatmap.2(as.matrix(log_tpm_tmm_filtered_clean),
+   col = myCol,
+   main = "log TPM",
+   key = T, lhei = c(1,10),
+   scale = "none",
+   density.info = "none",
+   reorderfun = function(d,w) reorder(d, w, agglo.FUN=mean),
+   trace = "none",
+   cexRow = 0.3,
+   cexCol = 0.6,
+   distfun = function(x) dist(x, method="euclidean"),
+   hclustfun = function(x) hclust(x, method="ward.D2"),
+   #colCol = group.colours,
+   ColSideColors = group.colours,
+   labCol = FALSE
+   )
+```
+
+
+# Differential expression
+#Heart LV vs AA
+```{r}
+#design matrix
+design = model.matrix(~ 0 + tissue, data = relevant_sample_meta) # + SMNABTCH + SMGEBTCH,
+colnames(design) = colnames(design) %>%
+  str_replace_all(" ", "") %>%
+  str_replace_all("tissue", "") %>%
+  str_replace_all("-", "_")
+
+y = estimateDisp(dgelist_tmm, design, verbose = T)
+
+plotBCV(y)
+plotMDS(y)
+
+plotMDS(y, method="bcv", col=as.numeric(y$samples$group))
+legend("bottomleft", as.character(unique(d$samples$group)))
+
+et <- exactTest(y)
+topTags(et)
+
+# Lv vs kidney cortex
+et_LV_vs_cortex <- exactTest(y, pair=c("Heart_Left_Ventricle","Kidney_Cortex"))
+topTags(et_LV_vs_cortex, n=10)
+de_LV_vs_cortex <- decideTestsDGE(et_LV_vs_cortex, adjust.method="BH", p.value=0.05)
+
+LV_vs_cortex_results = et_LV_vs_cortex$table %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(et_LV_vs_cortex$genes, by = "GTEx_ENSG") %>%
+  mutate(adj_PValue = p.adjust(PValue, method = "BH"))
+
+LV_vs_cortex_results %>% 
+  filter(adj_PValue < 0.05 & abs(logFC) > 2) %>%
+  dim
+
+# kidney cortex vs medulla
+et_cortex_vs_medulla <- exactTest(y, pair=c("Kidney_Cortex", "Kidney_Medulla"))
+  
+topTags(et_cortex_vs_medulla, n=10)
+de_cortex_vs_medulla <- decideTestsDGE(et_cortex_vs_medulla, adjust.method="BH", p.value=0.05)
+
+
+de_cortex_vs_medulla_tags <- rownames(y)[as.logical(de_cortex_vs_medulla)] 
+plotSmear(et_cortex_vs_medulla, de.tags=de_cortex_vs_medulla_tags)
+abline(h = c(-2, 2), col = "blue")
+
+cortex_vs_medulla_results = et_cortex_vs_medulla$table %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(et_cortex_vs_medulla$genes, by = "GTEx_ENSG") %>%
+  mutate(adj_PValue = p.adjust(PValue, method = "BH"))
+
+cortex_vs_medulla_results %>% 
+  filter(adj_PValue < 0.05 & abs(logFC) > 2) %>%
+  dim()
+```
+
+
+```{r}
+fit = glmQLFit(y, design)
+# contrast_matrix <- makeContrasts(
+#   D1.DvsD0.D= heart_aa-D0.D,
+#   D2.DvsD1.D= D2.D-D1.D,levels=design)
+
+contrast_matrix <- makeContrasts(Heart_LeftVentricle_vs_Heart_AtrialAppendage = Heart_LeftVentricle - Heart_AtrialAppendage,
+                                 levels=design)
+qlf = glmQLFTest(fit, contrast = contrast_matrix[,"Heart_LeftVentricle_vs_Heart_AtrialAppendage"])
+
+
+decideTestsDGE(qlf) %>% summary()
+
+
+#contrast.matrix <- makeContrasts(Experimental.groupHeart_failure-Experimental.groupControl, levels=design)
+```
+
+?treatDGE
+
+
+```{r}
+library(ggrepel)
+#quick dirty summary of differential expression
+results = topTags(qlf, adjust="fdr", sort.by="p.value", n=nrow(qlf))$table
+
+#volcanoplot
+results$diffexpressed = "No"
+results$diffexpressed[results$FDR < 0.01] = "Yes"
+results$DElabel <- NA
+results$DElabel[results$diffexpressed == "Yes"] <- results$hgnc_symbol[results$diffexpressed == "Yes"]
+
+results_goi = results %>%
+  dplyr:: filter(ensembl_gene_id %in% genes_of_interest$ensembl_gene_id)
+
+table(results$diffexpressed)
+
+volcano.colors <- c("red", "black")
+names(volcano.colors) <- c("Yes", "No")
+
+#all genes
+ggplot(results, aes(x=logFC, y=-log10(PValue), col=diffexpressed, label=DElabel)) +
+  geom_point(size = 0.1) +
+  scale_colour_manual(values = volcano.colors) +
+  geom_point(data = results_goi, aes(x=logFC, y=-log10(PValue)), col = "blue", size = 0.1) +
+  geom_text_repel(data = results_goi, aes(label=DElabel), col = "blue", size=3, max.overlaps = 10, show.legend = FALSE) +
+  xlab("log2 fold change") +
+  labs(col="Differentially expressed") +
+  ggtitle("Heart LV vs AA, all genes")
+
+#genes of interest only
+ggplot(results_goi, aes(x=logFC, y=-log10(PValue), col=diffexpressed, label=DElabel)) +
+  geom_point(size = 0.1) +
+  geom_text_repel(size=3, max.overlaps = 10, show.legend = FALSE) +
+  scale_colour_manual(values = volcano.colors) +
+  xlab("log2 fold change") +
+  labs(col="Differentially expressed") +
+  ggtitle("Heart LV vs AA, genes of interest only")
+```
+
+
+##plot pval histogram
+```{r}
+#P.value histogram
+ggplot(results, aes(x = PValue)) + 
+  geom_histogram(binwidth = 0.025, boundary = 0) +
+  ggtitle("p-value histogram: Heart LV vs AA, all genes")
+```
+
+## MA plot
+```{r}
+mycolors = c("black", "red")
+
+ggplot(results, aes(x=logCPM, y=logFC, col=diffexpressed, label=DElabel)) + 
+  geom_point(size=1) +
+  geom_text_repel(size=2) +
+  scale_colour_manual(values = mycolors) +
+  xlab("logCPM") +
+  ylab("log2 fold change") +
+  ggtitle("MA plot, Heart LV vs AA, all genes") +
+  geom_hline(yintercept=0) +
+  geom_hline(yintercept=1, linetype="dashed") +
+  geom_hline(yintercept=-1, linetype="dashed") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+
+#one way anova for all tissues
+```{r}
+fit = glmQLFit(y, design)
+# contrast_matrix <- makeContrasts(
+#   D1.DvsD0.D= heart_aa-D0.D,
+#   D2.DvsD1.D= D2.D-D1.D,levels=design)
+
+qlf = glmQLFTest(fit, coef = 2:6)
+
+
+decideTestsDGE(qlf) %>% summary()
+
+
+#contrast.matrix <- makeContrasts(Experimental.groupHeart_failure-Experimental.groupControl, levels=design)
+```
