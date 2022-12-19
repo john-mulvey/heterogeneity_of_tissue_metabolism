@@ -90,9 +90,18 @@ tissue_types = levels(sample_meta$tissue)
 
 tissues_of_interest = c("Kidney_Cortex", "Kidney_Medulla", "Muscle_Skeletal", "Heart_Left_Ventricle", "Heart_Atrial_Appendage", "Liver")
 
+# filter for tissuetissue contains >10 samples
+n_samples = sample_meta %>%
+  group_by(tissue) %>%
+  count()
+n_samples
+
 # pull IDs of relevant samples
 selected_sample_id = sample_meta %>%
-  filter(tissue %in% tissues_of_interest) %>%
+  filter(tissue %in% tissues_of_interest &
+           SMRIN > 7) %>%
+  group_by(tissue) %>%
+  filter(n() >10) %>%
   pull(SAMPID)
 ```
 
@@ -143,7 +152,7 @@ gene_info = gene_reads_matrix %>%
 ```
 
 
-## sample_again
+## sample_meta again
 ```{r}
 sample_meta = sample_meta %>%
   dplyr::filter(SAMPID %in% colnames(gene_reads_matrix)) %>%
@@ -151,28 +160,26 @@ sample_meta = sample_meta %>%
 ```
 
 
+## Mitocarta
+```{r}
+# Define mitochondrial genes
+mitocarta = read.csv("../data/mitocarta/Human.MitoCarta3.0_Human.MitoCarta3.0.csv")
+
+# mitocarta_mito_encoded = mitocarta %>%
+#   filter(hg19_Chromosome == "chrM")
+# 
+# # also using TXCHROM from biomart
+# mito_encoded_gene_info = gene_info %>%
+#   dplyr::filter(str_detect(description, 'mitochondrially encoded'))
+# 
+# non_mito_encoded_gene_info = gene_info %>%
+#   dplyr::filter(!str_detect(description, 'mitochondrially encoded'))
+```
+
+
 # Filter lowly expressed genes
-```{r}
-keep <- filterByExpr(gene_reads_matrix, group = groups)
-dge <- dge[keep,,keep.lib.sizes=FALSE]
-
-table(keep)
-```
-
-
-# Compare normalisation strategies
-## TMM normalise, individual samples
-```{r}
-# calculate TMM normalization factors
-gene_reads_matrix_tmm =  calcNormFactors(gene_reads_matrix, method = "TMM")
-
-#normalised counts per million
-gene_cpm_tmm = cpm(gene_reads_matrix_tmm, log=FALSE)
-```
-
-
-## TMM normalise by group
-i.e. collaspe groups into just one representative sample
+"by group" collaspes groups into just one representative sample
+otherwise leaves all samples as one would expect
 ```{r}
 groups = sample_meta %>%
   filter(SAMPID %in% colnames(gene_reads_matrix)) %>%
@@ -185,18 +192,30 @@ dgelist = DGEList(counts = gene_reads_matrix,
                   genes = gene_info)
 
 # filter lowly-expressed genes:
-dgelist_goi = dgelist[filterByExpr(dgelist, group=groups), ,keep.lib.sizes=FALSE]
+to_keep = filterByExpr(dgelist, group = groups)
+table(to_keep)
 
+dgelist = dgelist[to_keep, ,keep.lib.sizes=FALSE]
+```
+
+
+# Normalise
+```{r}
 #TMM normalisation
-dgelist_tmm = calcNormFactors(dgelist_goi, method = "TMM")
+dgelist_tmm = calcNormFactors(dgelist, method = "TMM")
 
-# counts per million
-gene_cpm_grouped_tmm = cpmByGroup(dgelist_tmm, log=FALSE, group = groups)
-gene_cpm_grouped_naive = cpmByGroup(dgelist_goi, log=FALSE, group = groups)
+# #not used
+# # counts per million grouped
+# gene_cpm_grouped_tmm = cpmByGroup(dgelist_tmm, log=FALSE, group = groups)
+# gene_cpm_grouped_naive = cpmByGroup(dgelist, log=FALSE, group = groups)
+# 
+# #counts per million
+# gene_cpm_tmm = cpm(dgelist_tmm, log = FALSE, group = groups)
 ```
 
 
 ## calculate TPM 
+TPM calc confirmed correct by gordon symthe: https://www.biostars.org/p/388584/ 
 ```{r}
 #TMM
 rpkm_grouped_tmm = edgeR::rpkmByGroup(dgelist_tmm, log=F, gene.length = dgelist_tmm$genes$gene_length) %>%
@@ -204,21 +223,20 @@ rpkm_grouped_tmm = edgeR::rpkmByGroup(dgelist_tmm, log=F, gene.length = dgelist_
 tpm_grouped_tmm = t(t(rpkm_grouped_tmm) / colSums(rpkm_grouped_tmm) ) * 1e6
 
 #naive
-rpkm_grouped_naive = edgeR::rpkmByGroup(dgelist_goi, log=F, gene.length = dgelist_goi$genes$gene_length) %>%
+rpkm_grouped_naive = edgeR::rpkmByGroup(dgelist, log=F, gene.length = dgelist$genes$gene_length) %>%
   na.omit()
 tpm_grouped_naive = t(t(rpkm_grouped_naive) / colSums(rpkm_grouped_naive) ) * 1e6
 
 #log2
-log_tpm_grouped_tmm = log2(tpm_grouped_tmm + 0.001) %>%
+log_tpm_grouped_tmm = log2(tpm_grouped_tmm + 1e-6) %>%
   as.data.frame()
 
-log_tpm_grouped_naive = log2(tpm_grouped_naive + 0.001) %>%
+log_tpm_grouped_naive = log2(tpm_grouped_naive + 1e-6) %>%
   as.data.frame()
-
 ```
 
 
-## Plot comparison of 2 tissues: kidney cortex vs skeletalmuscle
+## Digression: Plot comparison of 2 tissues: kidney cortex vs skeletalmuscle
 ```{r}
 #to add: select gnes expressed in both samples???
 log_tpm_grouped_tmm_toi = log_tpm_grouped_tmm[,c("Kidney_Cortex", "Muscle_Skeletal")]
@@ -251,7 +269,7 @@ rpkm_tmm <- edgeR::rpkm(dgelist_tmm, log=F, gene.length = dgelist_tmm$genes$gene
 tpm_tmm <- t(t(rpkm_tmm) / colSums(rpkm_tmm)) * 1e6
 
 #log2
-log_tpm_tmm = log2(tpm_tmm + 1) %>%
+log_tpm_tmm = log2(tpm_tmm + 1e-6) %>%
   as.data.frame()
 ```
 
@@ -306,7 +324,7 @@ genes_of_interest = read_excel("../data/MdW Protein list based on metabolic clus
   dplyr::select(Cluster, ensembl_gene_id)
 
 #ensure correct genes_of_interest is specified below
-marleen_df = tpm_grouped_tmm[,tissues_of_interest] %>%
+marleen_df = tpm_grouped_tmm[, colnames(tpm_grouped_tmm) %in% tissues_of_interest] %>%
   na.omit() %>%
   as.data.frame() %>%
   rownames_to_column("GTEx_ENSG") %>%
@@ -318,54 +336,41 @@ write.csv(marleen_df, "../output/tpm_grouped_by_tissue_specifed_genes_only.csv")
 ```
 
 
-# filter gene and sample list
+# filter gene list
 ## genes of interest
 ### filter genes
 ```{r}
 #filter for predefined metabolism relevant genes
 log_tpm_tmm_goi = log_tpm_tmm %>%
-  na.omit() %>%
   as.data.frame() %>%
   rownames_to_column("GTEx_ENSG") %>%
   left_join(gene_info, by = "GTEx_ENSG") %>%
   dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG, -description, -transcript_biotype, -chromosome_name) %>%
   right_join(genes_of_interest, by = "ensembl_gene_id") %>%
-  dplyr::select(-ensembl_gene_id, -hgnc_symbol, -Cluster) %>%
+  dplyr::select(-hgnc_symbol, -Cluster) %>%
+  column_to_rownames("ensembl_gene_id") %>%
   na.omit()
 
 tpm_tmm_goi = log_tpm_tmm^2
-
-# remove lowly expressed genes
-
-# protein coding genes only
-test = gene_info %>%
-  filter(transcript_biotype == "protein_coding")
-
-```
-
-
-### filter samples
-```{r}
-# tissue contains >10 samples
-n_samples = sample_meta %>%
-  group_by(tissue) %>%
-  count()
-n_samples
-
-enough_samples = sample_meta %>%
-  group_by(tissue) %>%
-  filter(n() >10)
-# ???filter based on tighter RIN cutoff???
 ```
 
 
 ## all genes
+### protein coding
 ```{r}
+# protein coding genes only
+protein_coding_genes = gene_info %>%
+  filter(transcript_biotype == "protein_coding") %>%
+  pull(ensembl_gene_id)
 
+protein_coding_log_tpm_tmm = log_tpm_tmm %>%
+  rownames_to_column("ensembl_gene_id") %>%
+  filter(ensembl_gene_id %in% protein_coding_genes) %>%
+  column_to_rownames("ensembl_gene_id")
 ```
 
 
-## average per tissue
+## average expr per tissue
 ### predefined goi
 ```{r}
 log_tpm_grouped_tmm_goi = log_tpm_grouped_tmm %>%
@@ -375,7 +380,18 @@ log_tpm_grouped_tmm_goi = log_tpm_grouped_tmm %>%
   dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG, -description, -transcript_biotype, -chromosome_name) %>%
   right_join(genes_of_interest, by = "ensembl_gene_id") %>%
   column_to_rownames("ensembl_gene_id") %>%
-  dplyr::select(-hgnc_symbol, -Cluster) 
+  dplyr::select(-hgnc_symbol, -Cluster)
+```
+
+
+### all genes
+#### protein coding
+```{r}
+#protein coding 
+protein_coding_log_tpm_grouped_tmm = log_tpm_grouped_tmm %>%
+  rownames_to_column("ensembl_gene_id") %>%
+  filter(ensembl_gene_id %in% protein_coding_genes) %>%
+  column_to_rownames("ensembl_gene_id")
 ```
 
 
@@ -383,7 +399,7 @@ log_tpm_grouped_tmm_goi = log_tpm_grouped_tmm %>%
 ## Correlation plot to assess similarity
 We calculate pairwise pearson correlation between samples to check for any outliers.
 ```{r}
-cor_matrix = cor(log_tpm_tmm_goi, use = "na.or.complete")
+cor_matrix = cor(log_tpm_tmm_goi, use = "pairwise.complete.obs")
 
 corrplot(cor_matrix, method="color", type="upper", order="hclust",
          tl.col="black", tl.srt=45, tl.cex = 0.5,
@@ -394,7 +410,7 @@ corrplot(cor_matrix, method="color", type="upper", order="hclust",
 ## PCA
 ### all genes
 ```{r}
-res_pca = PCA(t(log_tpm_tmm_goi), scale.unit=TRUE, ncp=5, graph=F)
+res_pca = PCA(t(log_tpm_tmm), scale.unit=TRUE, ncp=5, graph=F)
 
 fviz_screeplot(res_pca, ncp=10,
                ggtheme = theme_gray())
@@ -406,7 +422,7 @@ fviz_pca_ind(res_pca,
              repel = TRUE,
              #addEllipses=TRUE, ellipse.level=0.95,
              legend.title = "Tissue",
-             title = "PC1 vs PC2",
+             title = "All genes, PC1 vs PC2",
              invisible="quali",
              ggtheme = theme_gray())
 
@@ -417,7 +433,7 @@ fviz_pca_ind(res_pca,
              repel = TRUE,
              #addEllipses=TRUE, ellipse.level=0.95,
              legend.title = "Tissue",
-             title = "PC1 vs PC3",
+             title = "All genes, PC1 vs PC3",
              invisible="quali",
              ggtheme = theme_gray())
 
@@ -446,10 +462,10 @@ pc_correlations = cor(sample_meta_num, res_pca[["ind"]]$coord,
 
 pc_correlations %>%
   as.data.frame() %>%
-  rownames_to_column("clinical_variable") %>%
-  mutate(clinical_variable = fct_reorder(clinical_variable, abs(Dim.1))) %>%
-  pivot_longer(cols = -clinical_variable, names_to = "principal_component", values_to = "cor", ) %>%
-  ggplot(aes(x = clinical_variable, y = principal_component, fill = cor)) +
+  rownames_to_column("experimental_variable") %>%
+  mutate(experimental_variable = fct_reorder(experimental_variable, abs(Dim.1))) %>%
+  pivot_longer(cols = -experimental_variable, names_to = "principal_component", values_to = "cor", ) %>%
+  ggplot(aes(x = experimental_variable, y = principal_component, fill = cor)) +
   geom_tile(color = "white") +
  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
    midpoint = 0, limit = c(-1,1), space = "Lab", 
@@ -565,7 +581,7 @@ fviz_pca_ind(res_pca_goi,
              repel = TRUE,
              #addEllipses=TRUE, ellipse.level=0.95,
              legend.title = "Tissue",
-             title = "PC1 vs PC2",
+             title = "Metabolic genes, PC1 vs PC2",
              invisible="quali",
              ggtheme = theme_gray())
 
@@ -576,7 +592,7 @@ fviz_pca_ind(res_pca_goi,
              repel = TRUE,
              #addEllipses=TRUE, ellipse.level=0.95,
              legend.title = "Tissue",
-             title = "PC1 vs PC3",
+             title = "Metabolic genes, PC1 vs PC3",
              invisible="quali",
              ggtheme = theme_gray())
 
@@ -648,7 +664,7 @@ log_tpm_grouped_tmm_goi  %>%
   arrange(factor(ensembl_gene_id, levels = genes_of_interest$ensembl_gene_id)) %>%
   column_to_rownames("ensembl_gene_id") %>%
   na.omit() %>%
-  pheatmap(scale = "none",
+  pheatmap(scale = "row",
                    clustering_method = "ward.D2",
                    cluster_rows = FALSE,
                    clustering_distance_rows = "euclidean",
@@ -661,19 +677,36 @@ log_tpm_grouped_tmm_goi  %>%
                    annotation_row = pheat_inf_row,
            annotation_names_row = FALSE,
                    main = "Heatmap of metabolic gene expression averaged per tissue, z-score")
+```
+
+
+### mito encoded???
+```{r, fig.width = 8}
+#use breaks to allow the same colour _scale_ to be used across both unnormalised heatmaps
+breaksList = seq(min(log_tpm_grouped_tmm), max(log_tpm_grouped_tmm), by = 1)
 
 # as above, but without mito encoded genes
 ensg_mito_encoded = gene_info %>%
-  filter(chromosome_name == "MT")
+  filter(chromosome_name == "MT") %>%
+  pull(ensembl_gene_id)
 
-## all gneesn
+#check filtering strategy before plotting heatmap
 log_tpm_grouped_tmm  %>%
   rownames_to_column("ensembl_gene_id") %>%
-  arrange(factor(ensembl_gene_id, levels = genes_of_interest$ensembl_gene_id)) %>%
-  filter(ensembl_gene_id %in% ensg_mito_encoded$ensembl_gene_id) %>%
+  arrange(factor(ensembl_gene_id, levels = genes_of_interest$ensembl_gene_id)) %>% 
+  filter(str_detect(ensembl_gene_id, paste(ensg_mito_encoded, collapse = "|"))) %>%
+  mutate(ensembl_gene_id = str_extract(ensembl_gene_id, "[^\\.]+")) %>%
+  left_join(gene_info, by = "ensembl_gene_id")
+
+log_tpm_grouped_tmm  %>%
+  rownames_to_column("ensembl_gene_id") %>%
+  arrange(factor(ensembl_gene_id, levels = genes_of_interest$ensembl_gene_id)) %>% 
+  filter(str_detect(ensembl_gene_id, paste(ensg_mito_encoded, collapse = "|"))) %>%
   column_to_rownames("ensembl_gene_id") %>%
   na.omit() %>%
   pheatmap(scale = "none",
+           color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+           breaks = breaksList,
                    clustering_method = "ward.D2",
                    cluster_rows = FALSE,
                    clustering_distance_rows = "euclidean",
@@ -683,18 +716,80 @@ log_tpm_grouped_tmm  %>%
                    fontsize_row = 3,
                    fontsize_col = 5,
                    angle_col = 45,
-                   annotation_row = pheat_inf_row,
-           annotation_names_row = FALSE,
-                   main = "Heatmap of mito encoded gene expression averaged per tissue, z-score")
+                   main = "Heatmap of mito encoded gene expression averaged per tissue")
+  
+log_tpm_grouped_tmm  %>%
+  rownames_to_column("ensembl_gene_id") %>%
+  arrange(factor(ensembl_gene_id, levels = genes_of_interest$ensembl_gene_id)) %>% 
+  filter(str_detect(ensembl_gene_id, paste(ensg_mito_encoded, collapse = "|"))) %>%
+  mutate(ensembl_gene_id = str_extract(ensembl_gene_id, "[^\\.]+")) %>%
+  left_join(gene_info, by = "ensembl_gene_id") %>%
+  filter(transcript_biotype == "protein_coding") %>%
+  column_to_rownames("ensembl_gene_id") %>%
+  dplyr::select(Heart_Atrial_Appendage:Muscle_Skeletal) %>%
+  na.omit() %>%
+  pheatmap(scale = "none",
+           color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+           breaks = breaksList,
+                   clustering_method = "ward.D2",
+                   cluster_rows = FALSE,
+                   clustering_distance_rows = "euclidean",
+                   cluster_cols = TRUE,
+                   clustering_distance_cols = "euclidean",
+                   show_rownames = FALSE,
+                   fontsize_row = 3,
+                   fontsize_col = 5,
+                   angle_col = 45,
+                   main = "Heatmap of mito encoded protein coding gene expression averaged per tissue")
+
+# allow comparison between mitochondrial encoded vs nuclear encoded genes
+pheat_inf_gene_origin 
+  
+  
+gene_lcoation_df = log_tpm_grouped_tmm  %>%
+  rownames_to_column("ensembl_gene_id") %>%
+  arrange(factor(ensembl_gene_id, levels = genes_of_interest$ensembl_gene_id)) %>% 
+  #filter(str_detect(ensembl_gene_id, paste(ensg_mito_encoded, collapse = "|"))) %>%
+  mutate(ensembl_gene_id_clean = str_extract(ensembl_gene_id, "[^\\.]+")) %>%
+  left_join(gene_info, by = c("ensembl_gene_id_clean" = "ensembl_gene_id")) %>%
+  inner_join(mitocarta, by = c("ensembl_gene_id_clean" = "EnsemblGeneID_mapping_version_20200130")) %>%
+  filter(transcript_biotype == "protein_coding") %>%
+  mutate(gene_location = case_when(
+    hg19_Chromosome == "chrM" ~ "mitochondrial",
+         TRUE ~ "nuclear")) %>%
+  column_to_rownames("GTEx_ENSG") 
+
+pheat_inf_gene_origin = gene_lcoation_df%>%
+  dplyr::select(gene_location)
+
+gene_lcoation_df %>%
+  dplyr::select(Heart_Atrial_Appendage:Muscle_Skeletal) %>%
+  na.omit() %>%
+  pheatmap(scale = "none",
+           color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+           breaks = breaksList,
+                   clustering_method = "ward.D2",
+                   cluster_rows = FALSE,
+                   clustering_distance_rows = "euclidean",
+                   cluster_cols = TRUE,
+                   clustering_distance_cols = "euclidean",
+                   show_rownames = FALSE,
+                   fontsize_row = 3,
+                   fontsize_col = 5,
+                   angle_col = 45,
+           annotation_row = pheat_inf_gene_origin,
+                   main = "Heatmap of nuclear vs mito encoded protein coding gene expression averaged per tissue")
 
 ## from goi
 log_tpm_grouped_tmm_goi  %>%
   rownames_to_column("ensembl_gene_id") %>%
   arrange(factor(ensembl_gene_id, levels = genes_of_interest$ensembl_gene_id)) %>%
-  filter(ensembl_gene_id %in% ensg_mito_encoded$ensembl_gene_id) %>%
+  filter(ensembl_gene_id %in% ensg_mito_encoded) %>%
   column_to_rownames("ensembl_gene_id") %>%
   na.omit() %>%
   pheatmap(scale = "none",
+           color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+           breaks = breaksList,
                    clustering_method = "ward.D2",
                    cluster_rows = FALSE,
                    clustering_distance_rows = "euclidean",
@@ -706,15 +801,16 @@ log_tpm_grouped_tmm_goi  %>%
                    angle_col = 45,
                    annotation_row = pheat_inf_row,
            annotation_names_row = FALSE,
-                   main = "Heatmap of mito encoded gene expression averaged per tissue, z-score")
+                   main = "Heatmap of mito encoded metabolic gene expression averaged per tissue")
 
+# non mito encoded genes in predefined genes of interest
 log_tpm_grouped_tmm_goi  %>%
   rownames_to_column("ensembl_gene_id") %>%
   arrange(factor(ensembl_gene_id, levels = genes_of_interest$ensembl_gene_id)) %>%
-  filter(ensembl_gene_id %in% ensg_mito_encoded$ensembl_gene_id) %>%
+  filter(!ensembl_gene_id %in% ensg_mito_encoded) %>%
   column_to_rownames("ensembl_gene_id") %>%
   na.omit() %>%
-  pheatmap(scale = "none",
+  pheatmap(scale = "row",
                    clustering_method = "ward.D2",
                    cluster_rows = FALSE,
                    clustering_distance_rows = "euclidean",
@@ -726,7 +822,7 @@ log_tpm_grouped_tmm_goi  %>%
                    angle_col = 45,
                    annotation_row = pheat_inf_row,
            annotation_names_row = FALSE,
-                   main = "Heatmap of metabolic gene expression averaged per tissue, z-score")
+                   main = "Heatmap of metabolic gene expression (non-mito encoded) averaged per tissue, z-score")
 ```
 
 
@@ -764,41 +860,6 @@ log_tpm_grouped_tmm  %>%
                    fontsize_col = 5,
                    angle_col = 45,
                    main = "Heatmap of all protein coding gene expression averaged per tissue")
-```
-
-
-# Define mitochondrial genes
-```{r}
-mitocarta = read.csv("../data/mitocarta/Human.MitoCarta3.0_Human.MitoCarta3.0.csv")
-
-mitocarta_mito_encoded = mitocarta %>%
-  filter(hg19_Chromosome == "chrM")
-
-# also using TXCHROM from biomart
-
-mito_encoded_gene_info = gene_info %>%
-  dplyr::filter(str_detect(description, 'mitochondrially encoded'))
-
-non_mito_encoded_gene_info = gene_info %>%
-  dplyr::filter(!str_detect(description, 'mitochondrially encoded'))
-
-
-#heatmap mito genes per tissue
-log_tpm_tmm %>% 
-  rownames_to_column("ENSG") %>%
-  filter(ENSG %in% mitocarta_mito_encoded$ENSG) %>%
-  pheatmap(cale = "none",
-                   clustering_method = "ward.D2",
-                   cluster_rows = T,
-                   clustering_distance_rows = "euclidean",
-                   cluster_cols = T,
-                   clustering_distance_cols = "euclidean",
-                   show_rownames = TRUE,
-                   fontsize_row = 3,
-                   fontsize_col = 5,
-                   angle_col = 45,
-                   main = "Heatmap of metabolic gene expression in all samples",
-                   annotation_col=pheat_inf_col)
 ```
 
 
@@ -853,35 +914,36 @@ These corrected varaibles will then be eplicitly included in the design matrix f
 
 
 ## calc log TPM for batch corrected data
+not used, probably can delete?
 ```{r}
-gene_length_goi = dgelist_tmm$counts %>%
-  as.data.frame() %>%
-  rownames_to_column("GTEx_ENSG") %>%
-  left_join(gene_info, by = "GTEx_ENSG") %>%
-  pull(gene_length)
-
-#TMM
-rpkm_tmm_clean <- edgeR::rpkm(dgelist_tmm$counts, log=F, gene.length = gene_length_goi ) %>%
-  na.omit()
-tpm_tmm_clean <- t(t(rpkm_tmm_clean) / colSums(rpkm_tmm_clean) ) * 1e6
-
-#log2
-log_tpm_tmm_clean = log2(tpm_tmm_clean + 1)
-
-
-#filter for predefined metabolism relevant genes
-log_tpm_tmm_goi_clean = log_tpm_tmm_clean %>%
-  na.omit() %>%
-  as.data.frame() %>%
-  rownames_to_column("GTEx_ENSG") %>%
-  left_join(gene_info, by = "GTEx_ENSG") %>%
-  dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG, -description, -transcript_biotype, -chromosome_name) %>%
-  right_join(genes_of_interest, by = "ensembl_gene_id") %>%
-  dplyr::select(-ensembl_gene_id, -hgnc_symbol, -Cluster) %>%
-  as.matrix() %>%
-  na.omit()
-
-tpm_tmm_goi_clean = (log_tpm_tmm_goi_clean^2)-1
+# gene_length_goi = dgelist_tmm$counts %>%
+#   as.data.frame() %>%
+#   rownames_to_column("GTEx_ENSG") %>%
+#   left_join(gene_info, by = "GTEx_ENSG") %>%
+#   pull(gene_length)
+# 
+# #TMM
+# rpkm_tmm_clean <- edgeR::rpkm(dgelist_tmm$counts, log=F, gene.length = gene_length_goi ) %>%
+#   na.omit()
+# tpm_tmm_clean <- t(t(rpkm_tmm_clean) / colSums(rpkm_tmm_clean) ) * 1e6
+# 
+# #log2
+# log_tpm_tmm_clean = log2(tpm_tmm_clean + 1)
+# 
+# 
+# #filter for predefined metabolism relevant genes
+# log_tpm_tmm_goi_clean = log_tpm_tmm_clean %>%
+#   na.omit() %>%
+#   as.data.frame() %>%
+#   rownames_to_column("GTEx_ENSG") %>%
+#   left_join(gene_info, by = "GTEx_ENSG") %>%
+#   dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG, -description, -transcript_biotype, -chromosome_name) %>%
+#   right_join(genes_of_interest, by = "ensembl_gene_id") %>%
+#   dplyr::select(-ensembl_gene_id, -hgnc_symbol, -Cluster) %>%
+#   as.matrix() %>%
+#   na.omit()
+# 
+# tpm_tmm_goi_clean = (log_tpm_tmm_goi_clean^2)-1
 ```
 
 
@@ -982,7 +1044,7 @@ plotBCV(y)
 plotMDS(y)
 
 plotMDS(y, method="bcv", col=as.numeric(y$samples$group))
-legend("bottomleft", as.character(unique(d$samples$group)))
+legend("bottomleft", as.character(unique(y$samples$group)))
 
 et <- exactTest(y)
 topTags(et)
@@ -1003,25 +1065,25 @@ LV_vs_cortex_results %>%
 ```
 
 
-## Kidney cortex vs kidney medulla
+## Kidney cortex vs liver
 ```{r}
 # kidney cortex vs medulla
-et_cortex_vs_medulla <- exactTest(y, pair=c("Kidney_Cortex", "Kidney_Medulla"))
+et_cortex_vs_liver <- exactTest(y, pair=c("Kidney_Cortex", "Liver"))
   
-topTags(et_cortex_vs_medulla, n=10)
-de_cortex_vs_medulla <- decideTestsDGE(et_cortex_vs_medulla, adjust.method="BH", p.value=0.05)
+topTags(et_cortex_vs_liver, n=10)
+de_cortex_vs_liver <- decideTestsDGE(et_cortex_vs_liver, adjust.method="BH", p.value=0.05)
 
 
-de_cortex_vs_medulla_tags <- rownames(y)[as.logical(de_cortex_vs_medulla)] 
-plotSmear(et_cortex_vs_medulla, de.tags=de_cortex_vs_medulla_tags)
+de_cortex_vs_liver_tags <- rownames(y)[as.logical(de_cortex_vs_liver)] 
+plotSmear(et_cortex_vs_liver, de.tags=de_cortex_vs_liver_tags)
 abline(h = c(-2, 2), col = "blue")
 
-cortex_vs_medulla_results = et_cortex_vs_medulla$table %>%
+cortex_vs_liver_results = et_cortex_vs_liver$table %>%
   rownames_to_column("GTEx_ENSG") %>%
-  left_join(et_cortex_vs_medulla$genes, by = "GTEx_ENSG") %>%
+  left_join(et_cortex_vs_liver$genes, by = "GTEx_ENSG") %>%
   mutate(adj_PValue = p.adjust(PValue, method = "BH"))
 
-cortex_vs_medulla_results %>% 
+cortex_vs_liver_results %>% 
   filter(adj_PValue < 0.05 & abs(logFC) > 2) %>%
   dim()
 ```
@@ -1034,7 +1096,7 @@ fit = glmQLFit(y, design)
 #   D1.DvsD0.D= heart_aa-D0.D,
 #   D2.DvsD1.D= D2.D-D1.D,levels=design)
 
-contrast_matrix <- makeContrasts(Heart_LeftVentricle_vs_Heart_AtrialAppendage = Heart_LeftVentricle - Heart_AtrialAppendage,
+contrast_matrix <- makeContrasts(Heart_LeftVentricle_vs_Heart_AtrialAppendage = Heart_Left_Ventricle - Heart_Atrial_Appendage,
                                  levels=design)
 qlf = glmQLFTest(fit, contrast = contrast_matrix[,"Heart_LeftVentricle_vs_Heart_AtrialAppendage"])
 
@@ -1096,6 +1158,7 @@ ggplot(results, aes(x = PValue)) +
   ggtitle("p-value histogram: Heart LV vs AA, all genes")
 ```
 
+
 ### MA plot
 ```{r}
 mycolors = c("black", "red")
@@ -1130,10 +1193,13 @@ fit = glmQLFit(y, design)
 #   D1.DvsD0.D= heart_aa-D0.D,
 #   D2.DvsD1.D= D2.D-D1.D,levels=design)
 
-qlf = glmQLFTest(fit, coef = 2:6)
+qlf = glmQLFTest(fit, coef = 2:5)
 
 
-decideTestsDGE(qlf) %>% summary()
+results_aov = decideTestsDGE(qlf,adjust.method = "BH", p.value = 0.05, lfc = 2) #"p.value" is actually FDR
+
+results_aov %>% 
+  summary() %>% view()
 
 
 #contrast.matrix <- makeContrasts(Experimental.groupHeart_failure-Experimental.groupControl, levels=design)
@@ -1142,11 +1208,26 @@ decideTestsDGE(qlf) %>% summary()
 
 ### heatmap of genes significant in ANOVA
 ```{r}
-#show individual samples
-log_tpm_tmm_goi[rownames(log_tpm_tmm_goi) %in% rownames(limma_aov_results)[limma_aov_results$adj.P.Val < 0.05],] %>%
+#marleen genes only
+log_tpm_tmm_goi[rownames(log_tpm_tmm_goi) %in% rownames(results_aov)[results_aov$adj.P.Val < 0.05],] %>%
 pheatmap(
            scale = "none",
                    clustering_method = "ward.D2",
+                   cluster_rows = T,
+                   clustering_distance_rows = "euclidean",
+                   cluster_cols = T,
+                   clustering_distance_cols = "euclidean",
+                   show_rownames = TRUE,
+                   fontsize_row = 3,
+                   fontsize_col = 5,
+                   angle_col = 45,
+                   main = "Heatmap of metabolic gene expression in all samples",
+                   annotation_col=pheat_inf_col)
+
+# all genes
+log_tpm_tmm[rownames(log_tpm_tmm) %in% rownames(results_aov)[results_aov$adj.P.Val < 0.05],] %>%
+pheatmap(cale = "none",
+                  clustering_method = "ward.D2",
                    cluster_rows = T,
                    clustering_distance_rows = "euclidean",
                    cluster_cols = T,
