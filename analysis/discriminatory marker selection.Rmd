@@ -1,0 +1,209 @@
+---
+title: "Discrimatory marker selection"
+author: "John Mulvey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: flatly
+    highlight: tango
+  html_document:
+    toc: yes
+    df_print: paged
+---
+
+In GTEx transcriptome.Rmd, we explore how the transcriptome (espeacially that of a predefined set of metabolic genes of interest) differes between different tissue.
+
+In order to provide a practical reommendation in the paper, Jan has suggested that we come up with a small panel of genes that could feasibly be measured by e.g. qPCR in the lab, in order that people may check that their model system (cell culture, organoids, perhaps even as far as ex vivo perfued organs) sufficiently recapitualtes human organ physiology.
+
+# Load packages
+```{r}
+library(tidymodels)
+library(themis)
+library(vip)
+library(rpart.plot)
+```
+
+
+# Load and wrangle data
+```{r}
+readRDS(log_tpm_tmm_goi, file = "../results/log_tpm_tmm_goi.rds")
+readRDS(sample_meta, file = "../results/sample_meta.rds")
+
+metabolic_genes = log_tpm_tmm_goi %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("SAMPID") %>%
+  left_join(sample_meta %>% dplyr::select(SAMPID, tissue), by = "SAMPID", na_matches = "never")
+```
+
+
+# Preprocess
+```{r}
+set.seed(123)
+metabolic_genes_split <- initial_split(metabolic_genes, strata = tissue)
+metabolic_genes_train <- training(metabolic_genes_split)
+metabolic_genes_test <- testing(metabolic_genes_split)
+
+# check stratified sampling
+metabolic_genes_test %>%
+  group_by(tissue) %>%
+  summarise(n = n())
+
+sample_meta %>%
+  group_by(tissue) %>%
+  summarise(n = n())
+
+metabolic_genes_trees_rec <- recipe(tissue ~ ., data = metabolic_genes_train) %>%
+  update_role(SAMPID, new_role = "ID") %>%
+  step_nzv(all_predictors()) %>%
+  themis::step_smote(tissue, seed = 456)
+
+metabolic_genes_trees_prep <- prep(metabolic_genes_trees_rec)
+metabolic_genes_trees_juiced <- juice(metabolic_genes_trees_prep)
+```
+
+
+# Random forest
+```{r}
+rf_spec <- rand_forest(trees = 1000) %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+rf_wf <- workflow() %>%
+  add_recipe(metabolic_genes_trees_rec) %>%
+  add_model(rf_spec)
+
+rf_res = rf_wf %>%
+  last_fit(metabolic_genes_split)
+```
+
+
+# Examine results
+## Confusion matrix
+```{r}
+rf_res %>%
+  collect_metrics()
+
+rf_res %>%
+  collect_predictions() %>%
+  conf_mat(tissue, .pred_class)
+
+rf_res %>%
+  collect_predictions() %>%
+  group_by(tissue) %>%
+  summarise(n = n())
+```
+
+
+## Variable importance
+```{r}
+rf_spec %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(tissue ~ .,
+    data = metabolic_genes_trees_juiced) %>%
+  vip(geom = "point") +
+  scale_y_continuous(expand = c(0, 0))
+```
+
+
+```{r}
+metabolic_genes_pred <- rf_res %>%
+  collect_predictions() %>%
+  mutate(correct = tissue == .pred_class) %>%
+  left_join(metabolic_genes %>%
+    mutate(.row = row_number()))
+```
+
+
+# Decision trees
+```{r}
+decision_tree(mode = "classification", tree_depth = 5)
+```
+
+## define workflow
+??? repeat with min_n = 2 in order to build some redundancy into the model?
+```{r}
+decision_trees_spec <- decision_tree(tree_depth = 5) %>%
+  set_mode("classification") %>%
+  set_engine("rpart")
+
+decision_trees_wf <- workflow() %>%
+  add_recipe(metabolic_genes_trees_rec) %>%
+  add_model(decision_trees_spec)
+
+decision_trees_res = decision_trees_wf %>%
+  last_fit(metabolic_genes_split)
+```
+
+
+## Examine results
+### Confusion matrix
+```{r}
+decision_trees_res %>%
+  collect_metrics()
+
+decision_trees_res %>%
+  collect_predictions() %>%
+  conf_mat(tissue, .pred_class)
+```
+
+
+### Plot decision trees
+```{r}
+# decision_trees_spec %>%
+#   fit(tissue ~ .,
+#     data = metabolic_genes_trees_juiced) %>%
+#   vip(geom = "point") +
+#   scale_y_continuous(expand = c(0, 0))
+
+decision_tree_fit <- decision_trees_wf %>% 
+   fit(metabolic_genes_train) %>%
+  pull_workflow_fit()
+rpart.plot(decision_tree_fit$fit)
+
+decision_tree_fit # show tree
+```
+
+
+# Decision trees2
+
+## define workflow
+Repeat as above with min 2 genes per step - increase robustness?
+```{r}
+decision_trees2_spec <- decision_tree(tree_depth = 5, min_n = 2) %>%
+  set_mode("classification") %>%
+  set_engine("rpart")
+
+decision_trees2_wf <- workflow() %>%
+  add_recipe(metabolic_genes_trees_rec) %>%
+  add_model(decision_trees2_spec)
+
+decision_trees2_res = decision_trees2_wf %>%
+  last_fit(metabolic_genes_split)
+```
+
+
+## Examine results
+### Confusion matrix
+```{r}
+decision_trees2_res %>%
+  collect_metrics()
+
+decision_trees2_res %>%
+  collect_predictions() %>%
+  conf_mat(tissue, .pred_class)
+```
+
+
+### Plot decision trees
+```{r}
+decision_tree_fit <- decision_trees2_wf %>% 
+   fit(metabolic_genes_train) %>%
+  pull_workflow_fit()
+rpart.plot(decision_tree_fit$fit)
+
+decision_tree_fit # show tree
+```
