@@ -153,11 +153,15 @@ gene_info = gene_reads_matrix %>%
 ```
 
 
-## sample_meta again
+## sample_meta again inc number of samples of each tissue
 ```{r}
 sample_meta = sample_meta %>%
   dplyr::filter(SAMPID %in% colnames(gene_reads_matrix)) %>%
   droplevels()
+
+sample_meta %>%
+  group_by(tissue) %>%
+  summarise(n = n())
 ```
 
 
@@ -333,7 +337,7 @@ tpm_grouped_tmm %>%
   left_join(gene_info, by = "GTEx_ENSG") %>%
   dplyr::select(-start_position, -end_position, -gene_length, -
 GTEx_ENSG) %>%
-  write.csv("../output/average_log_tpm_grouped_by_tissue.csv")
+  write.csv("../results/average_log_tpm_grouped_by_tissue.csv")
 ```
 
 
@@ -353,7 +357,7 @@ marleen_df = tpm_grouped_tmm[, colnames(tpm_grouped_tmm) %in% tissues_of_interes
   dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG, -description) %>%
   right_join(genes_of_interest, by = "ensembl_gene_id")
 
-write.csv(marleen_df, "../output/tpm_grouped_by_tissue_specifed_genes_only.csv")
+write.csv(marleen_df, "../results/tpm_grouped_by_tissue_specifed_genes_only.csv")
 ```
 
 
@@ -1551,4 +1555,16 @@ enrichmentOutput$Tissue<-row.names(enrichmentOutput)
 #     colnames(TSGenes) <- c("Gene", "Tissue", "Group")
 #     TSGenes[, "Gene"] <- unlist(geneList[as.numeric(TSGenes[, "Gene"])])
 ```
+
+
+# save objects
+```{r}
+objects_to_save = list(sample_meta = sample_meta, 
+                    log_tpm_tmm_goi = log_tpm_tmm_goi)
+
+for(i in names(objects_to_save)){
+  saveRDS(objects_to_save[[i]], paste0("../results/", i, ".rds"))
+}
+```
+
 
