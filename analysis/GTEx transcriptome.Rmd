@@ -58,7 +58,7 @@ The TPM values that are downloadable have not been normalized or corrected for a
 
 
 #Load packagges
-```{r}
+```{r, message = FALSE, wanring = FALSE}
 library(tidyverse)
 library(data.table)
 library(edgeR)
@@ -71,6 +71,10 @@ library(FactoMineR)
 library(psych)
 library(GGally)
 library(pheatmap)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+library(ggrepel)
 ```
 
 
@@ -162,6 +166,12 @@ sample_meta = sample_meta %>%
 sample_meta %>%
   group_by(tissue) %>%
   summarise(n = n())
+  
+library(kableExtra)
+sample_meta %>%
+  group_by(tissue) %>%
+  summarise(n = n()) %>%
+  kable()
 ```
 
 
@@ -200,7 +210,7 @@ dgelist = DGEList(counts = gene_reads_matrix,
 to_keep = filterByExpr(dgelist, group = groups)
 table(to_keep)
 
-dgelist = dgelist[to_keep, ,keep.lib.sizes=FALSE]
+dgelist = dgelist[to_keep, , keep.lib.sizes=FALSE]
 ```
 
 
@@ -1070,11 +1080,11 @@ plotMeanVar(y, show.raw.vars = TRUE, show.tagwise.vars = TRUE, show.binned=TRUE)
 # plotMDS(y, method="bcv", col=as.numeric(y$samples$group))
 # legend("bottomleft", as.character(unique(y$samples$group)))
 
-et <- exactTest(y)
+et <- exactTest(y, dispersion = "trended")
 topTags(et)
 
 # Lv vs kidney cortex
-et_LV_vs_cortex <- exactTest(y, pair=c("Heart_Left_Ventricle","Kidney_Cortex"))
+et_LV_vs_cortex <- exactTest(y, pair=c("Heart_Left_Ventricle","Kidney_Cortex"), dispersion = "trended")
 topTags(et_LV_vs_cortex, n=10)
 de_LV_vs_cortex <- decideTestsDGE(et_LV_vs_cortex, adjust.method="BH", p.value=0.05)
 
@@ -1091,7 +1101,7 @@ LV_vs_cortex_results %>%
 ## Kidney cortex vs liver
 ```{r}
 # kidney cortex vs medulla
-et_cortex_vs_liver <- exactTest(y, pair=c("Kidney_Cortex", "Liver"))
+et_cortex_vs_liver <- exactTest(y, pair=c("Kidney_Cortex", "Liver"), dispersion = "trended")
   
 topTags(et_cortex_vs_liver, n=10)
 de_cortex_vs_liver <- decideTestsDGE(et_cortex_vs_liver, adjust.method="BH", p.value=0.01, lfc = 5)
@@ -1268,11 +1278,11 @@ edgeR_results_vs %>%
 ```{r}
 # metabolic genes only
 pval_threshold  = 0.01
-logFC_treshold = 2
+logFC_threshold = 2
 
 heart_vs_others_genes = edgeR_results_vs %>%
   filter(str_detect(ensembl_gene_id, paste(protein_coding_genes, collapse = "|"))) %>%
-  filter(adj_PValue < pval_threshold  & (logFC.Heart_vs_others > logFC_treshold))
+  filter(adj_PValue < pval_threshold  & (logFC.Heart_vs_others > logFC_threshold))
   
 log_tpm_tmm_goi %>%
   rownames_to_column("GTEx_ENSG") %>%
@@ -1285,6 +1295,7 @@ pheatmap(scale = "none",
                    cluster_cols = T,
                    clustering_distance_cols = "euclidean",
                    show_rownames = TRUE,
+                   show_colnames = FALSE,
                    fontsize_row = 3,
                    fontsize_col = 5,
                    angle_col = 45,
@@ -1308,6 +1319,7 @@ pheatmap(scale = "none",
                    cluster_cols = T,
                    clustering_distance_cols = "euclidean",
                    show_rownames = TRUE,
+                   show_colnames = FALSE,
                    fontsize_row = 3,
                    fontsize_col = 5,
                    angle_col = 45,
@@ -1329,6 +1341,64 @@ log_tpm_tmm_long_sample %>%
 ```
 
 
+### export results of ANOVA
+```{r}
+sig_anova = edgeR_results_vs %>%
+  filter(str_detect(ensembl_gene_id, paste(protein_coding_genes, collapse = "|"))) %>%
+  filter(adj_PValue < pval_threshold) %>%
+  filter(if_any(contains("logFC"), ~ . > logFC_threshold))
+
+# any genes
+log_tpm_tmm_sig_anova = log_tpm_tmm %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  filter(GTEx_ENSG %in% sig_anova$GTEx_ENSG) %>%
+  column_to_rownames("GTEx_ENSG")
+
+log_tpm_tmm_grouped_sig_anova = log_tpm_grouped_tmm %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  filter(GTEx_ENSG %in% sig_anova$GTEx_ENSG) %>%
+  column_to_rownames("GTEx_ENSG")
+
+log_tpm_tmm_grouped_sig_anova %>%
+pheatmap(scale = "row",
+                   clustering_method = "ward.D2",
+                   cluster_rows = T,
+                   clustering_distance_rows = "euclidean",
+                   cluster_cols = T,
+                   clustering_distance_cols = "euclidean",
+                  show_rownames = FALSE,
+                   show_colnames = TRUE,
+                   fontsize_row = 3,
+                   fontsize_col = 5,
+                   angle_col = 45,
+         #annotation_col=pheat_inf_col,
+         annotation_names_col = FALSE,
+                   main ="Heatmap of metabolic genes significant in any contrast")
+
+# metabolic genes only
+log_tpm_tmm_grouped_sig_anova_goi = log_tpm_grouped_tmm_goi %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  filter(str_detect(GTEx_ENSG, sig_anova$GTEx_ENSG)) %>%
+  column_to_rownames("GTEx_ENSG")
+
+log_tpm_tmm_grouped_sig_anova_goi %>%
+  pheatmap(scale = "row",
+                   clustering_method = "ward.D2",
+                   cluster_rows = T,
+                   clustering_distance_rows = "euclidean",
+                   cluster_cols = T,
+                   clustering_distance_cols = "euclidean",
+                  show_rownames = FALSE,
+                   show_colnames = TRUE,
+                   fontsize_row = 3,
+                   fontsize_col = 5,
+                   angle_col = 45,
+         #annotation_col=pheat_inf_col,
+         annotation_names_col = FALSE,
+                   main ="Heatmap of metabolic genes significant in any contrast")
+```
+
+
 ### Programmatically produce results using for loop
 ```{r}
 # metabolic genes only
@@ -1336,7 +1406,7 @@ for (i in colnames(contrasts)){
   name_genes <- paste0(i, "_genes") 
   assign(name_genes, edgeR_results_vs %>%
   filter(str_detect(ensembl_gene_id, paste(protein_coding_genes, collapse = "|"))) %>%
-  filter(adj_PValue < pval_threshold & get(paste0("logFC.", i)) > logFC_treshold))
+  filter(adj_PValue < pval_threshold & get(paste0("logFC.", i)) > logFC_threshold))
   
   name_metabolic_genes <- paste0(i, "_metabolic_genes") 
   assign(name_metabolic_genes, get(paste0(i, "_genes")) %>%
@@ -1361,23 +1431,24 @@ pheatmap(scale = "none",
          annotation_names_col = FALSE,
                    main = paste0("Heatmap of metabolic genes significantly alter in: ", i))
   
-  edgeR_results_vs[[paste0("DE_", i)]] <- if_else(edgeR_results_vs$adj_PValue < pval_threshold & paste0("edgeR_results_vs$logFC.", i) > logFC_treshold, TRUE, FALSE, missing = NA)
+  edgeR_results_vs[[paste0("DE_", i)]] <- if_else(edgeR_results_vs$adj_PValue < pval_threshold & paste0("edgeR_results_vs$logFC.", i) > logFC_threshold, TRUE, FALSE, missing = NA)
   
   # assign(edgeR_results_vs, edgeR_results_vs %>%
-  #   mutate_(!!sym(paste0("DE_", i)) = if_else(adj_PValue < pval_threshold & !!sym(paste0("logFC.", i)) > logFC_treshold, 1, 0, missing = NA)))
+  #   mutate_(!!sym(paste0("DE_", i)) = if_else(adj_PValue < pval_threshold & !!sym(paste0("logFC.", i)) > logFC_threshold, 1, 0, missing = NA)))
   
 }
 
 ```
 
+
 ```{r}
 any_tissue_vs_others_genes = edgeR_results_vs %>%
   filter(str_detect(ensembl_gene_id, paste(protein_coding_genes, collapse = "|")) &
            adj_PValue < pval_threshold  & 
-           (abs(logFC.Heart_vs_others) > logFC_treshold |
-                                           abs(logFC.Kidney_vs_others) > logFC_treshold |
-                                         abs(logFC.Liver_vs_others) > logFC_treshold |
-                                           abs(logFC.Muscle_vs_others) > logFC_treshold))
+           (abs(logFC.Heart_vs_others) > logFC_threshold |
+                                           abs(logFC.Kidney_vs_others) > logFC_threshold |
+                                         abs(logFC.Liver_vs_others) > logFC_threshold |
+                                           abs(logFC.Muscle_vs_others) > logFC_threshold))
   
 log_tpm_tmm_goi %>%
   rownames_to_column("GTEx_ENSG") %>%
@@ -1446,125 +1517,597 @@ border_color = NA,
 ```
 
 
-
-# tissue enrichment
-see vignette: https://bioconductor.org/packages/release/bioc/vignettes/TissueEnrich/inst/doc/TissueEnrich.html#teenrichment-tissue-specific-gene-enrichment-using-human-or-mouse-genes
-Has some useful viz options, but does not do what we want: to a priori define a list of tissue specific genes
-To define tissue specificity in the first place, it uses the algorithm from the HPA: [@uhlen_2015]
-
-HPA appraoch:
-The genes are divided into six groups based on their gene expression across the tissues. These groups are:
-
-Not Expressed: Genes with an expression level less than 1 (TPM or FPKM) across all the tissues.
-Tissue Enriched: Genes with an expression level greater than or equal to 1 (TPM or FPKM) that also have at least five-fold higher expression levels in a particular tissue compared to all other tissues.
-Group Enriched: Genes with an expression level greater than or equal to 1 (TPM or FPKM) that also have at least five-fold higher expression levels in a group of 2-7 tissues compared to all other tissues, and that are not considered Tissue Enriched.
-Tissue Enhanced: Genes with an expression level greater than or equal to 1 (TPM or FPKM) that also have at least five-fold higher expression levels in a particular tissue compared to the average levels in all other tissues, and that are not considered Tissue Enriched or Group Enriched.
-Expressed in all: Genes with an expression level greater than or equal to 1 (TPM or FPKM) across all of the tissues that are not in any of the above 4 groups.
-Mixed: Genes that are not assigned to any of the above 5 groups.
-
-This can be done with teGeneRetrieval from tissue enrich package
+### Volcano plots
+#### heart vs others
 ```{r}
-library(TissueEnrich)
+qlf_contrast_heart = glmQLFTest(fit, contrast = contrasts[,"Heart_vs_others"])
 
-genes<-system.file("extdata", "inputGenes.txt", package = "TissueEnrich")
-inputGenes<-scan(genes,character())
+edgeR_results_heart = topTags(qlf_contrast_heart, adjust="fdr", sort.by="p.value", n=nrow(qlf))$table
 
-gs<-GeneSet(geneIds = unique(gene_info$hgnc_symbol), organism="Homo Sapiens", geneIdType=SymbolIdentifier())
-output<-teEnrichment(inputGenes = gs)
 
-seEnrichmentOutput<-output[[1]]
-enrichmentOutput<-setNames(data.frame(assay(seEnrichmentOutput),row.names = rowData(seEnrichmentOutput)[,1]), colData(seEnrichmentOutput)[,1])
-enrichmentOutput$Tissue<-row.names(enrichmentOutput)
+edgeR_results_heart = edgeR_results_heart %>%
+  mutate(diffexpressed = case_when(FDR < pval_threshold & abs(logFC) > logFC_threshold ~ TRUE,
+                              TRUE ~ FALSE))
 
+edgeR_results_heart_goi = edgeR_results_heart %>%
+  dplyr:: filter(ensembl_gene_id %in% genes_of_interest$ensembl_gene_id)
+
+table(edgeR_results_heart$diffexpressed)
+
+#with density indiceated by point colour
+library(ggpointdensity)
+ggplot(edgeR_results_heart, aes(x=logFC, y=-log10(PValue))) +
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_heart %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_heart %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 25, show.legend = FALSE) +
+  xlab("log2 fold change") +
+  labs(col="adj.P.Val < 0.05 & abs(logFC) > 2") +
+  ggtitle("Heart vs all other tissues, all genes")
+
+#genes of interest only
+ggplot(edgeR_results_heart_goi, aes(x=logFC, y=-log10(PValue))) +
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_heart_goi %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_heart_goi %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 5, show.legend = FALSE) +
+  xlab("log2 fold change") +
+  labs(col="adj.P.Val < 0.05 & abs(logFC) > 2") +
+  ggtitle("Heart vs all other tissues, metabolic genes only")
 ```
 
 ```{r}
-# # taken from teGeneRetrieval fucntion code
-# expData <- setNames(assay(expressionData), colData(expressionData)[,1])
-#     geneList <- as.list(rowData(expressionData)[, 1])
-#     x <- lapply(seq(1, nrow(expData)), FUN = function(j) {
-#         df <- c()
-#         tpm <- expData[j, ]
-#         gene <- j
-#         tpm <- sort(tpm, decreasing = TRUE)
-#         highTPM <- tpm[1]
-# 
-#         #### Check for Not Expressed
-#         if (highTPM >= expressedGeneThreshold) {
-#             secondHighTPM <- tpm[2]
-#             foldChangeHigh <- highTPM/secondHighTPM
-#             ### Check for Tissue Enriched
-#             if (foldChangeHigh >= foldChangeThreshold) {
-#                 df <- c(gene, names(tpm)[1], "Tissue-Enriched")
-#             } else {
-#                 #### Check for Group Enriched
-#                 thresholdForGroupTPM <- highTPM/foldChangeThreshold
-#                 groupTPM <- tpm[(tpm >= thresholdForGroupTPM) &
-#                     (tpm >= expressedGeneThreshold), drop = FALSE]
-#                 isFound <- FALSE
-#                 if (length(groupTPM) <= maxNumberOfTissues &&
-#                     length(groupTPM) >= minNumberOfTissues) {
-#                         fc <- lapply(2:(length(groupTPM)),
-#                         FUN = function(i) {
-#                             meanTPMForGroup <- mean(groupTPM[seq(1, i)])
-#                             highestTPMOutsideGroup <- tpm[i + 1]
-#                             fc <- meanTPMForGroup/highestTPMOutsideGroup
-#                             return(fc)
-#                         })
-# 
-#                     idx <- (fc >= foldChangeThreshold)
-#                     if (sum(idx) > 0) {
-#                         index <- which.max(idx)
-#                         x <- lapply(seq(1, (index + 1)),
-#                             FUN = function(i) {
-#                             c(gene, names(tpm)[i], "Group-Enriched") })
-#                         df <- do.call("rbind", x)
-#                         isFound <- TRUE
-#                     }
-#                 }
-# 
-#                 if (!isFound) {
-#                     #### Check for Expressed In All
-#                     if (all(tpm >= expressedGeneThreshold)) {
-#                         df <- c(gene, "All", "Expressed-In-All")
-#                     } else {
-#                         #### Check for Tissue Enhanced
-#                         tissueEnhancedThreshold <- mean(tpm) *
-#                             foldChangeThreshold
-#                         enhancedGene <- tpm[(tpm >= tissueEnhancedThreshold) &
-#                             (tpm >= expressedGeneThreshold), drop = FALSE]
-#                         if (length(enhancedGene) >= 1) {
-#                             x <- lapply(names(enhancedGene),
-#                                 FUN = function(enhancedTissue) {
-#                                     c(gene, enhancedTissue, "Tissue-Enhanced")
-#                                 })
-#                             df <- do.call("rbind", x)
-#                         } else {
-#                             df <- c(gene, "All", "Mixed")
-#                         }
-#                     }
-#                 }
-#             }
-#         } else {
-#             df <- c(gene, "All", "Not-Expressed")
-#         }
-#         return(df)
-#     })
-# 
-#     TSGenes <- do.call("rbind", x)
-#     colnames(TSGenes) <- c("Gene", "Tissue", "Group")
-#     TSGenes[, "Gene"] <- unlist(geneList[as.numeric(TSGenes[, "Gene"])])
+#Pvalue histogram
+ggplot(edgeR_results_heart, aes(x = PValue)) + 
+  geom_histogram(binwidth = 0.025, boundary = 0) +
+  ggtitle("p-value histogram: Heart vs other tissues")
+
+#MA plot
+ggplot(edgeR_results_heart, aes(x=logCPM, y=logFC)) + 
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_heart %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_heart %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 25, show.legend = FALSE) +
+  xlab("log2 mean expression") +
+  ylab("log2 fold change") +
+  ggtitle("MA plot between Heart and all other tissues") +
+  geom_hline(yintercept=0) +
+  geom_hline(yintercept=1, linetype="dashed") +
+  geom_hline(yintercept=-1, linetype="dashed") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# barplot logFC
+barplot(sort(edgeR_results_heart$logFC, decreasing = F),
+        ylab = "LogFC",
+        xlab = "protein",
+         main="Heart vs other tissues")
+```
+
+
+#### kidney vs others
+```{r}
+qlf_contrast_kidney = glmQLFTest(fit, contrast = contrasts[,"Kidney_vs_others"])
+
+edgeR_results_kidney = topTags(qlf_contrast_kidney, adjust="fdr", sort.by="p.value", n=nrow(qlf))$table
+
+
+edgeR_results_kidney = edgeR_results_kidney %>%
+  mutate(diffexpressed = case_when(FDR < pval_threshold & abs(logFC) > logFC_threshold ~ TRUE,
+                              TRUE ~ FALSE))
+
+edgeR_results_kidney_goi = edgeR_results_kidney %>%
+  dplyr:: filter(ensembl_gene_id %in% genes_of_interest$ensembl_gene_id)
+
+table(edgeR_results_kidney$diffexpressed)
+
+#with density indiceated by point colour
+library(ggpointdensity)
+ggplot(edgeR_results_kidney, aes(x=logFC, y=-log10(PValue))) +
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_kidney %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_kidney %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 25, show.legend = FALSE) +
+  xlab("log2 fold change") +
+  labs(col="adj.P.Val < 0.05 & abs(logFC) > 2") +
+  ggtitle("Kidney vs all other tissues, all genes")
+
+# metabolic genes
+ggplot(edgeR_results_kidney_goi, aes(x=logFC, y=-log10(PValue))) +
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_kidney_goi %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_kidney_goi %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 5, show.legend = FALSE) +
+  xlab("log2 fold change") +
+  labs(col="adj.P.Val < 0.05 & abs(logFC) > 2") +
+  ggtitle("Kidney vs all other tissues,  metabolic genes only")
+```
+
+
+```{r}
+#Pvalue histogram
+ggplot(edgeR_results_kidney, aes(x = PValue)) + 
+  geom_histogram(binwidth = 0.025, boundary = 0) +
+  ggtitle("p-value histogram: Kidney vs other tissues")
+
+#MA plot
+ggplot(edgeR_results_kidney, aes(x=logCPM, y=logFC)) + 
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_kidney_goi %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_kidney_goi %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 25, show.legend = FALSE) +
+  xlab("log2 mean expression") +
+  ylab("log2 fold change") +
+  ggtitle("MA plot between Kidney and all other tissues") +
+  geom_hline(yintercept=0) +
+  geom_hline(yintercept=1, linetype="dashed") +
+  geom_hline(yintercept=-1, linetype="dashed") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# barplot logFC
+barplot(sort(edgeR_results_kidney$logFC, decreasing = F),
+        ylab = "LogFC",
+        xlab = "protein",
+         main="Kidney vs other tissues")
+```
+
+
+#### liver vs others
+```{r}
+qlf_contrast_liver = glmQLFTest(fit, contrast = contrasts[,"Liver_vs_others"])
+
+edgeR_results_liver = topTags(qlf_contrast_liver, adjust="fdr", sort.by="p.value", n=nrow(qlf))$table
+
+
+edgeR_results_liver = edgeR_results_liver %>%
+  mutate(diffexpressed = case_when(FDR < pval_threshold & abs(logFC) > logFC_threshold ~ TRUE,
+                              TRUE ~ FALSE))
+
+edgeR_results_liver_goi = edgeR_results_liver %>%
+  dplyr:: filter(ensembl_gene_id %in% genes_of_interest$ensembl_gene_id)
+
+table(edgeR_results_liver$diffexpressed)
+
+#with density indiceated by point colour
+library(ggpointdensity)
+ggplot(edgeR_results_liver, aes(x=logFC, y=-log10(PValue))) +
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_liver %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_liver %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 25, show.legend = FALSE) +
+  xlab("log2 fold change") +
+  labs(col="adj.P.Val < 0.05 & abs(logFC) > 2") +
+  ggtitle("Liver vs all other tissues, all genes")
+
+#genes of interest only
+ggplot(edgeR_results_liver_goi, aes(x=logFC, y=-log10(PValue))) +
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_liver_goi %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_liver_goi %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 5, show.legend = FALSE) +
+  xlab("log2 fold change") +
+  labs(col="adj.P.Val < 0.05 & abs(logFC) > 2") +
+  ggtitle("Liver vs all other tissues,  metabolic genes only")
+```
+
+
+```{r}
+#Pvalue histogram
+ggplot(edgeR_results_liver, aes(x = PValue)) + 
+  geom_histogram(binwidth = 0.025, boundary = 0) +
+  ggtitle("p-value histogram: Liver vs other tissues")
+
+#MA plot
+ggplot(edgeR_results_liver, aes(x=logCPM, y=logFC)) + 
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_liver %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_liver %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 25, show.legend = FALSE) +
+  xlab("log2 mean expression") +
+  ylab("log2 fold change") +
+  ggtitle("MA plot between Liver and all other tissues") +
+  geom_hline(yintercept=0) +
+  geom_hline(yintercept=1, linetype="dashed") +
+  geom_hline(yintercept=-1, linetype="dashed") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# barplot logFC
+barplot(sort(edgeR_results_liver$logFC, decreasing = F),
+        ylab = "LogFC",
+        xlab = "protein",
+         main="Liver vs other tissues")
+```
+
+
+#### muscle vs others
+```{r}
+qlf_contrast_muscle = glmQLFTest(fit, contrast = contrasts[,"Muscle_vs_others"])
+
+edgeR_results_muscle = topTags(qlf_contrast_muscle, adjust="fdr", sort.by="p.value", n=nrow(qlf))$table
+
+
+edgeR_results_muscle = edgeR_results_muscle %>%
+  mutate(diffexpressed = case_when(FDR < pval_threshold & abs(logFC) > logFC_threshold ~ TRUE,
+                              TRUE ~ FALSE))
+
+edgeR_results_muscle_goi = edgeR_results_muscle %>%
+  dplyr:: filter(ensembl_gene_id %in% genes_of_interest$ensembl_gene_id)
+
+table(edgeR_results_muscle$diffexpressed)
+
+#with density indiceated by point colour
+library(ggpointdensity)
+ggplot(edgeR_results_muscle, aes(x=logFC, y=-log10(PValue))) +
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_muscle %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_muscle %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 25, show.legend = FALSE) +
+  xlab("log2 fold change") +
+  labs(col="adj.P.Val < 0.05 & abs(logFC) > 2") +
+  ggtitle("Muscle vs all other tissues, all genes")
+
+#genes of interest only
+ggplot(edgeR_results_muscle_goi, aes(x=logFC, y=-log10(PValue))) +
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_muscle_goi %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_muscle_goi %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 5, show.legend = FALSE) +
+  xlab("log2 fold change") +
+  labs(col="adj.P.Val < 0.05 & abs(logFC) > 2") +
+  ggtitle("Muscle vs all other tissues,  metabolic genes only")
+```
+
+
+```{r}
+#Pvalue histogram
+ggplot(edgeR_results_muscle, aes(x = PValue)) + 
+  geom_histogram(binwidth = 0.025, boundary = 0) +
+  ggtitle("p-value histogram: Muscle vs other tissues")
+
+#MA plot
+ggplot(edgeR_results_muscle, aes(x=logCPM, y=logFC)) + 
+  geom_pointdensity(size = 0.5, show.legend = F) +
+  scale_color_gradient(low = "#6baed6", high = "#08306b") +
+  geom_point(data = edgeR_results_muscle %>% filter(diffexpressed == TRUE), size = 0.5, col="red") +
+  geom_label_repel(data = edgeR_results_muscle %>% filter(diffexpressed == TRUE), aes(label = hgnc_symbol), size=3, max.overlaps = 5, show.legend = FALSE) +
+  xlab("log2 mean expression") +
+  ylab("log2 fold change") +
+  ggtitle("MA plot between Muscle and all other tissues") +
+  geom_hline(yintercept=0) +
+  geom_hline(yintercept=1, linetype="dashed") +
+  geom_hline(yintercept=-1, linetype="dashed") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# barplot logFC
+barplot(sort(edgeR_results_muscle$logFC, decreasing = F),
+        ylab = "LogFC",
+        xlab = "protein",
+         main="Muscle vs other tissues")
+```
+
+
+# GSEA using custom metabolic pathways
+## heart vs others
+```{r}
+term2gene = marleen_df %>%
+  mutate(Cluster = as.factor(Cluster)) %>%
+  dplyr::select(term = Cluster, gene = ensembl_gene_id)
+
+# prep ranked protein list
+heart_vs_others_genes_ranked = edgeR_results_heart %>%
+  dplyr::select(logFC, ensembl_gene_id) %>%
+  group_by(ensembl_gene_id) %>%
+  summarise(logFC = mean(logFC)) %>% #bodge, should sum abundance before testing
+  arrange(desc(logFC)) %>%
+  pull(logFC, name = ensembl_gene_id)
+
+# calcualte enrichment
+heart_vs_others_genes_mpe = GSEA(heart_vs_others_genes_ranked,
+         TERM2GENE = term2gene,
+         pvalueCutoff = 1,
+         pAdjustMethod = "BH",
+         minGSSize = 10,
+         maxGSSize = 10000,
+         by = "fgsea")
+
+heart_vs_others_genes_mpe = pairwise_termsim(heart_vs_others_genes_mpe)
+
+heart_vs_others_genes_mpe@result
+
+heart_vs_others_genes_mpe@result %>%
+  filter(p.adjust < 0.05) %>%
+  mutate(ID = fct_reorder(ID, NES)) %>%
+  ggplot(aes(x = ID, y = NES, fill = pvalue)) +
+  geom_col() +
+  coord_flip()
+
+heart_vs_others_genes_mpe@result %>%
+  ggplot(aes(x = NES, y = -log10(pvalue), label = ID)) +
+  geom_point(aes(size = setSize/10)) +
+  geom_label_repel(data = heart_vs_others_genes_mpe@result %>% filter(-log10(pvalue) > 2),
+                  size = 3, max.overlaps = 8)
+```
+
+
+## kidney cortex vs others
+```{r}
+term2gene = marleen_df %>%
+  mutate(Cluster = as.factor(Cluster)) %>%
+  dplyr::select(term = Cluster, gene = ensembl_gene_id)
+
+# prep ranked protein list
+kidney_vs_others_genes_ranked = edgeR_results_kidney %>%
+  dplyr::select(logFC, ensembl_gene_id) %>%
+  group_by(ensembl_gene_id) %>%
+  summarise(logFC = mean(logFC)) %>% #bodge, should sum abundance before testing
+  arrange(desc(logFC)) %>%
+  pull(logFC, name = ensembl_gene_id)
+
+# calcualte enrichment
+kidney_vs_others_genes_mpe = GSEA(kidney_vs_others_genes_ranked,
+         TERM2GENE = term2gene,
+         pvalueCutoff = 1,
+         pAdjustMethod = "BH",
+         minGSSize = 10,
+         maxGSSize = 10000,
+         by = "fgsea")
+
+kidney_vs_others_genes_mpe = pairwise_termsim(kidney_vs_others_genes_mpe)
+
+kidney_vs_others_genes_mpe@result
+
+kidney_vs_others_genes_mpe@result %>%
+  filter(p.adjust < 0.05) %>%
+  mutate(ID = fct_reorder(ID, NES)) %>%
+  ggplot(aes(x = ID, y = NES, fill = pvalue)) +
+  geom_col() +
+  coord_flip()
+
+kidney_vs_others_genes_mpe@result %>%
+  ggplot(aes(x = NES, y = -log10(pvalue), label = ID)) +
+  geom_point(aes(size = setSize/10)) +
+  geom_label_repel(data = kidney_vs_others_genes_mpe@result %>% filter(-log10(pvalue) > 2),
+                  size = 3, max.overlaps = 8)
+```
+
+
+## liver vs others
+```{r}
+term2gene = marleen_df %>%
+  mutate(Cluster = as.factor(Cluster)) %>%
+  dplyr::select(term = Cluster, gene = ensembl_gene_id)
+
+# prep ranked protein list
+liver_vs_others_genes_ranked = edgeR_results_liver %>%
+  dplyr::select(logFC, ensembl_gene_id) %>%
+  group_by(ensembl_gene_id) %>%
+  summarise(logFC = mean(logFC)) %>% #bodge, should sum abundance before testing
+  arrange(desc(logFC)) %>%
+  pull(logFC, name = ensembl_gene_id)
+
+# calcualte enrichment
+liver_vs_others_genes_mpe = GSEA(liver_vs_others_genes_ranked,
+         TERM2GENE = term2gene,
+         pvalueCutoff = 1,
+         pAdjustMethod = "BH",
+         minGSSize = 10,
+         maxGSSize = 10000,
+         by = "fgsea")
+
+liver_vs_others_genes_mpe = pairwise_termsim(liver_vs_others_genes_mpe)
+
+liver_vs_others_genes_mpe@result
+
+liver_vs_others_genes_mpe@result %>%
+  filter(p.adjust < 0.05) %>%
+  mutate(ID = fct_reorder(ID, NES)) %>%
+  ggplot(aes(x = ID, y = NES, fill = pvalue)) +
+  geom_col() +
+  coord_flip()
+
+liver_vs_others_genes_mpe@result %>%
+  ggplot(aes(x = NES, y = -log10(pvalue), label = ID)) +
+  geom_point(aes(size = setSize/10)) +
+  geom_label_repel(data = liver_vs_others_genes_mpe@result %>% filter(-log10(pvalue) > 2),
+                  size = 3, max.overlaps = 8)
+```
+
+
+# GSEA
+## heart vs others
+```{r}
+heart_vs_others_gse_gobp <- clusterProfiler::gseGO(geneList = heart_vs_others_genes_ranked,
+             ont ="BP",
+             keyType = "ENSEMBL",
+             minGSSize = 5,
+             maxGSSize = 800,
+             pvalueCutoff = 1,
+             verbose = TRUE,
+             OrgDb = org.Hs.eg.db,
+             pAdjustMethod = "fdr")
+
+heart_vs_others_gse_significant = heart_vs_others_gse_gobp@result %>%
+  dplyr::filter(p.adjust <0.05)
+
+enrichplot::dotplot(heart_vs_others_gse_gobp, showCategory=10, split=".sign", color = "p.adjust") +
+  facet_grid(.~factor(.sign, levels=c("suppressed", "activated")))
+
+heart_vs_others_gse_gobp = pairwise_termsim(heart_vs_others_gse_gobp) #showCategory = nrow(gse@result)
+
+#show top 200
+heart_vs_others_gse_gobp %>%
+  filter(p.adjust < 0.05) %>%
+emapplot(showCategory = 200,
+         cex_label_category = 0.5,
+         color = "NES") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red")
+```
+
+
+## kidney vs others
+```{r}
+kidney_vs_others_gse_gobp <- clusterProfiler::gseGO(geneList = kidney_vs_others_genes_ranked,
+             ont ="BP",
+             keyType = "ENSEMBL",
+             minGSSize = 5,
+             maxGSSize = 800,
+             pvalueCutoff = 1,
+             verbose = TRUE,
+             OrgDb = org.Hs.eg.db,
+             pAdjustMethod = "fdr")
+
+kidney_vs_others_gse_significant = kidney_vs_others_gse_gobp@result %>%
+  dplyr::filter(p.adjust <0.05)
+
+enrichplot::dotplot(kidney_vs_others_gse_gobp, showCategory=10, split=".sign", color = "p.adjust") +
+  facet_grid(.~factor(.sign, levels=c("suppressed", "activated")))
+
+kidney_vs_others_gse_gobp = pairwise_termsim(kidney_vs_others_gse_gobp) #showCategory = nrow(gse@result)
+
+#show top 200
+kidney_vs_others_gse_gobp %>%
+  filter(p.adjust < 0.05) %>%
+emapplot(showCategory = 200,
+         cex_label_category = 0.5,
+         color = "NES") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red")
+```
+
+
+## liver vs others
+```{r}
+liver_vs_others_gse_gobp <- clusterProfiler::gseGO(geneList = liver_vs_others_genes_ranked,
+             ont ="BP",
+             keyType = "ENSEMBL",
+             minGSSize = 5,
+             maxGSSize = 800,
+             pvalueCutoff = 1,
+             verbose = TRUE,
+             OrgDb = org.Hs.eg.db,
+             pAdjustMethod = "fdr")
+
+liver_vs_others_gse_significant = liver_vs_others_gse_gobp@result %>%
+  dplyr::filter(p.adjust <0.05)
+
+enrichplot::dotplot(liver_vs_others_gse_gobp, showCategory=10, split=".sign", color = "p.adjust") +
+  facet_grid(.~factor(.sign, levels=c("suppressed", "activated")))
+
+liver_vs_others_gse_gobp = pairwise_termsim(liver_vs_others_gse_gobp) #showCategory = nrow(gse@result)
+
+#show top 200
+liver_vs_others_gse_gobp %>%
+  filter(p.adjust < 0.05) %>%
+emapplot(showCategory = 200,
+         cex_label_category = 0.5,
+         color = "NES") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red")
+```
+
+
+# all pairwise comparisons
+```{r}
+tissues <- c("Heart_Left_Ventricle", "Kidney_Cortex", "Liver", "Muscle_Skeletal")
+
+for (i in 1:(length(tissues)-1)) {
+  for (j in (i+1):length(tissues)) {
+    tissue1 <- tissues[i]
+    tissue2 <- tissues[j]
+    
+    # Lv vs kidney cortex
+    et_comparison <- exactTest(y, pair = c(tissue1, tissue2), dispersion = "trended")
+    
+    de_comparison <- decideTestsDGE(et_comparison, adjust.method = "BH", p.value = 0.05)
+    
+    results <- et_comparison$table %>%
+      rownames_to_column("GTEx_ENSG") %>%
+      left_join(et_comparison$genes, by = "GTEx_ENSG") %>%
+      mutate(adj_PValue = p.adjust(PValue, method = "BH"))
+    
+    assign(paste0(tissue1, "_", tissue2, "_edgeR_results"), results)
+    
+    # GSEA custom metabolic pathways
+    ranked_genes <- results %>%
+      dplyr::select(logFC, ensembl_gene_id) %>%
+      group_by(ensembl_gene_id) %>%
+      summarise(logFC = mean(logFC)) %>%
+      arrange(desc(logFC)) %>%
+      pull(logFC, name = ensembl_gene_id)
+    
+    gse_metabolic <- GSEA(ranked_genes,
+                          TERM2GENE = term2gene,
+                          pvalueCutoff = 1,
+                          pAdjustMethod = "BH",
+                          minGSSize = 10,
+                          maxGSSize = 10000,
+                          by = "fgsea")
+    
+    gse_metabolic <- pairwise_termsim(gse_metabolic)
+    
+    assign(paste0(tissue1, "_", tissue2, "_gse_metabolic"), gse_metabolic)
+    
+    gse_metabolic@result %>%
+      filter(p.adjust < 0.05) %>%
+      mutate(ID = fct_reorder(ID, NES)) %>%
+      ggplot(aes(x = ID, y = NES, fill = pvalue)) +
+      geom_col() +
+      coord_flip()
+    
+    gse_metabolic@result %>%
+      ggplot(aes(x = NES, y = -log10(pvalue), label = ID)) +
+      geom_point(aes(size = setSize/10)) +
+      geom_label_repel(data = gse_metabolic@result %>% filter(-log10(pvalue) > 2),
+                       size = 3, max.overlaps = 8)
+    
+    # GSEA GO:BP
+    gse_gobp <- clusterProfiler::gseGO(geneList = ranked_genes,
+                                       ont = "BP",
+                                       keyType = "ENSEMBL",
+                                       minGSSize = 5,
+                                       maxGSSize = 800,
+                                       pvalueCutoff = 1,
+                                       verbose = TRUE,
+                                       OrgDb = org.Hs.eg.db,
+                                       pAdjustMethod = "fdr")
+    
+    gse_gobp <- pairwise_termsim(gse_gobp)
+    
+    assign(paste0(tissue1, "_", tissue2, "_gse_gobp"), gse_gobp)
+    
+    enrichplot::dotplot(gse_gobp, showCategory = 10, split = ".sign", color = "p.adjust") +
+      facet_grid(. ~ factor(.sign, levels = c("suppressed", "activated")))
+
+    # Show top 200
+    gse_gobp %>%
+      filter(p.adjust < 0.05) %>%
+      emapplot(showCategory = 200,
+               cex_label_category = 0.5,
+               color = "NES") +
+      scale_fill_gradient2(low = "blue", mid = "white", high = "red")
+  }
+}
+
+
+Heart_Left_Ventricle_Liver_gse_gobp %>%
+      filter(p.adjust < 0.05) %>%
+      emapplot(showCategory = 200,
+               cex_label_category = 0.5,
+               color = "NES") +
+      scale_fill_gradient2(low = "blue", mid = "white", high = "red")
 ```
 
 
 # save objects
 ```{r}
 objects_to_save = list(sample_meta = sample_meta, 
-                    log_tpm_tmm_goi = log_tpm_tmm_goi)
+                    log_tpm_tmm_goi = log_tpm_tmm_goi,
+                    log_tpm_grouped_tmm_goi = log_tpm_grouped_tmm_goi) #,gse_gobp = gse_gobp
 
 for(i in names(objects_to_save)){
   saveRDS(objects_to_save[[i]], paste0("../results/", i, ".rds"))
 }
 ```
 
+
+```{r}
+sessionInfo()
+```
 
