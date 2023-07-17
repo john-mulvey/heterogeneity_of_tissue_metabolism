@@ -62,7 +62,6 @@ The TPM values that are downloadable have not been normalized or corrected for a
 library(tidyverse)
 library(data.table)
 library(edgeR)
-library(biomaRt)
 library(readxl)
 library(corrplot)
 library(RColorBrewer)
@@ -75,6 +74,7 @@ library(clusterProfiler)
 library(enrichplot)
 library(org.Hs.eg.db)
 library(ggrepel)
+library(biomaRt)
 ```
 
 
@@ -712,6 +712,88 @@ log_tpm_grouped_tmm_goi  %>%
                    annotation_row = pheat_inf_row,
            annotation_names_row = FALSE,
                    main = "Heatmap of metabolic gene expression averaged per tissue, z-score")
+```
+
+
+#### arranged by metabolic pathway, and then clsutered within each pathway
+```{r}
+# Extract the names of the clusters
+pathways <- marleen_df$Cluster %>%
+  as.factor() %>%
+  levels()
+
+genes_of_pathway_1 = marleen_df %>%
+  dplyr::select(ensembl_gene_id, Cluster) %>%
+  filter(Cluster == pathways[1]) %>%
+  pull(ensembl_gene_id)
+
+expression_of_genes_of_pathway_1 = log_tpm_tmm_goi[rownames(log_tpm_tmm_goi) %in% genes_of_pathway_1,]
+
+# Create a dissimilarity matrix using Euclidean distance
+expression_of_genes_of_pathway_1_dist =  dist(t(expression_of_genes_of_pathway_1), method = "euclidean")
+
+# Perform hierarchical clustering using ward.D2 method
+expression_of_genes_of_pathway_1_hclust <- hclust(expression_of_genes_of_pathway_1_dist, method = "ward.D2")
+
+# Reorder the rows based on cluster and similarity within each cluster
+ordered_pathway_1 <- log_tpm_grouped_tmm_goi[expression_of_genes_of_pathway_1_hclust$order, ]
+```
+
+
+```{r}
+# create object to store ordering of genes
+goi_order <- data.frame(pathway = character(), ensembl_gene_id = character(), stringsAsFactors = FALSE)
+
+# Iterate over each pathway
+for (pathway in pathways) {
+  # Get genes of the current pathway
+  genes_of_pathway <- marleen_df %>%
+    filter(Cluster == pathway &
+             ensembl_gene_id %in% rownames(log_tpm_grouped_tmm_goi)) %>%
+    pull(ensembl_gene_id)
+  
+  # Subset the expression data for the current pathway
+  expression_of_genes <- log_tpm_grouped_tmm_goi[rownames(log_tpm_grouped_tmm_goi) %in% genes_of_pathway, ] %>%
+    drop_na() %>%
+    t() %>% 
+    scale() %>% 
+    t()
+  
+  # Create a dissimilarity matrix using Euclidean distance
+  distance_matrix <- dist(expression_of_genes, method = "euclidean") 
+  
+  # Perform hierarchical clustering using ward.D2 method
+  hclust_result <- hclust(distance_matrix, method = "ward.D2")
+  
+  ordered_expression <- expression_of_genes[hclust_result$order, ]
+  
+  # store gene order based upon expression profile
+  ordered_df <- data.frame(pathway = pathway, ensembl_gene_id = rownames(ordered_expression), stringsAsFactors = FALSE)
+  
+  # Append the ordered rows to goi_order
+  goi_order <- rbind(goi_order, ordered_df)
+}
+
+cluster_groups <- as.factor(goi_order$pathway)
+
+goi_order <- goi_order %>%
+  mutate(pathway_changes = cumsum(lag(pathway, default = as(pathway[1], class(pathway))) != pathway),
+    change_indicator = ifelse(lag(pathway_changes, default = 0) < pathway_changes, 1, 0))
+
+log_tpm_grouped_tmm_goi[goi_order$ensembl_gene_id,] %>%
+  pheatmap(scale = "row",
+           clustering_method = "ward.D2",
+           cluster_rows = FALSE,
+           cluster_cols = TRUE,
+           clustering_distance_cols = "euclidean",
+           show_rownames = FALSE,
+           fontsize_row = 3,
+           fontsize_col = 5,
+           angle_col = 45,
+           annotation_row = pheat_inf_row,
+           annotation_names_row = FALSE,
+           gaps_row = which(goi_order$change_indicator == 1)-1,
+           main = "Heatmap of metabolic gene expression averaged per tissue, z-score")
 ```
 
 
@@ -1378,7 +1460,7 @@ pheatmap(scale = "row",
 # metabolic genes only
 log_tpm_tmm_grouped_sig_anova_goi = log_tpm_grouped_tmm_goi %>%
   rownames_to_column("GTEx_ENSG") %>%
-  filter(str_detect(GTEx_ENSG, sig_anova$GTEx_ENSG)) %>%
+  filter(GTEx_ENSG %in% sig_anova$ensembl_gene_id) %>%
   column_to_rownames("GTEx_ENSG")
 
 log_tpm_tmm_grouped_sig_anova_goi %>%
@@ -1396,6 +1478,8 @@ log_tpm_tmm_grouped_sig_anova_goi %>%
          #annotation_col=pheat_inf_col,
          annotation_names_col = FALSE,
                    main ="Heatmap of metabolic genes significant in any contrast")
+
+write.csv(log_tpm_tmm_grouped_sig_anova_goi, "../results/average_log_tpm_grouped_by_tissue_sig_anova_only.csv")
 ```
 
 
@@ -2013,7 +2097,7 @@ for (i in 1:(length(tissues)-1)) {
     tissue2 <- tissues[j]
     
     # Lv vs kidney cortex
-    et_comparison <- exactTest(y, pair = c(tissue1, tissue2), dispersion = "trended")
+    et_comparison <- exactTest(y, pair = c(tissue2, tissue1), dispersion = "trended")
     
     de_comparison <- decideTestsDGE(et_comparison, adjust.method = "BH", p.value = 0.05)
     
@@ -2093,6 +2177,65 @@ Heart_Left_Ventricle_Liver_gse_gobp %>%
                color = "NES") +
       scale_fill_gradient2(low = "blue", mid = "white", high = "red")
 ```
+
+## plot enrichment of custom metabolic pathways
+### volcano like
+```{r}
+# Loop over each combination of tissues
+for (tissue1 in tissues) {
+  for (tissue2 in tissues) {
+    # Create the object name
+    object_name <- paste0(tissue1, "_", tissue2, "_gse_metabolic")
+    
+    # Check if the object exists
+    if (exists(object_name)) {
+      # Plotting code
+      plot_code <- paste0("plot_obj <- ", object_name, "@result %>%",
+                          "ggplot(aes(x = NES, y = -log10(pvalue), label = ID)) +",
+                          "geom_point(aes(size = setSize/10)) +",
+                          "geom_label_repel(data = . %>% filter(-log10(pvalue) > 2),",
+                          "size = 3, max.overlaps = 8) +
+                          ggtitle('", object_name, "')")
+      
+      # Evaluate the plotting code
+      eval(parse(text = plot_code))
+      
+      # Print the plot
+      print(plot_obj)
+    }
+  }
+}
+```
+
+
+### barchart
+```{r}
+# Loop over each combination of tissues
+for (tissue1 in tissues) {
+  for (tissue2 in tissues) {
+    # Create the object name
+    object_name <- paste0(tissue1, "_", tissue2, "_gse_metabolic")
+    
+    # Check if the object exists
+    if (exists(object_name)) {
+      # Plotting code
+      plot_code <- paste0("plot_obj <- ", object_name, "@result %>%",
+                          "ggplot(aes(x = NES, y = -log10(pvalue), label = ID)) +",
+                          "geom_point(aes(size = setSize/10)) +",
+                          "geom_label_repel(data = . %>% filter(-log10(pvalue) > 2),",
+                          "size = 3, max.overlaps = 8) +
+                          ggtitle('", object_name, "')")
+      
+      # Evaluate the plotting code
+      eval(parse(text = plot_code))
+      
+      # Print the plot
+      print(plot_obj)
+    }
+  }
+}
+```
+
 
 
 # save objects
