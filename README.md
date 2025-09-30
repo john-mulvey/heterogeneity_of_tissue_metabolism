@@ -9,16 +9,19 @@ cd heterogeneity_of_tissue_metabolism
 ```
 
 This directory is laid out as follows:
-├── data/          
+```
+.
+├── data/
 ├── analysis/
-│   ├── 01_01_metabolomics_heatmap.Rmd
+│   ├── 01_metabolomics_heatmap.Rmd
 │   ├── 02_GTEx_transcriptome.Rmd
-│   ├── 03_03_discriminatory_marker_selection.Rmd
-├── results/        
-│   ├── data/       
+│   └── 03_discriminatory_marker_selection.Rmd
+├── results/
+│   ├── data/
 │   └── plots/
 ├── LICENCE.md
 └── README.md
+```
 
 2. Download the data file containing the RNAseq data from the GTEx portal (https://gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression):
 
