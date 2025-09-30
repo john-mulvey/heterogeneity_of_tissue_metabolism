@@ -1,0 +1,41 @@
+# .gitignore
+
+# Ignore everything by default, and then explicitly whitelist
+*
+
+# ===== Documentation =====
+!.gitignore
+!README.md
+!LICENSE
+
+# ===== Analysis =====
+!analysis/
+!analysis/01_metabolomics_heatmap.Rmd
+!analysis/01_metabolomics_heatmap.nb.html
+!analysis/02_GTEx_transcriptome.Rmd
+!analysis/02_GTEx_transcriptome.nb.html
+!analysis/03_discriminatory_marker_selection.Rmd
+!analysis/03_discriminatory_marker_selection.nb.html
+
+!analysis/Heterogeneity of tissue metabolism.Rproj
+
+# ===== Data =====
+!data/
+!data/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt
+!data/GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt
+!data/HumanGEM_gene_list.xlsx
+!data/curated_metabolic_pathways.csv
+!data/metabolomics_summary/
+!data/metabolomics_summary/*
+
+# ===== Results =====
+!results/
+!results/log_tpm_tmm_goi.rds
+!results/sample_meta.rds
+!results/log_tpm_grouped_tmm_goi.rds
+!results/data/
+!results/plots/
+
+# ===== Keep directory structure =====
+!data/.gitkeep
+!results/data/.gitkeep

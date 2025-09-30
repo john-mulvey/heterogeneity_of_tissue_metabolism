@@ -1,0 +1,98 @@
+---
+title: "Metabolomics heatmap"
+author: "John Mulvey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: flatly
+    highlight: tango
+  html_document:
+    toc: yes
+    df_print: paged
+---
+
+Using data prepared by LL, here we plot a figure with consistent aesthetics.
+
+# packages
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(janitor)
+library(pheatmap)
+library(ggplotify)
+library(RColorBrewer)
+library(scales)
+```
+
+
+# load data
+```{r}
+logFC_data = read.csv("../data/metabolomics_summary/Final version AV data Jang Murashige Lindeman by LL_logFC.csv") %>%
+  column_to_rownames("metabolite") %>%
+  dplyr::select(-pathway)
+
+stats_data = read.csv("../data/metabolomics_summary/Final version AV data Jang Murashige Lindeman by LL_stats.csv") %>%
+  mutate(across(contains("pig") | contains("human"), as.numeric)) %>%
+  column_to_rownames("metabolite") %>%
+  dplyr::select(-pathway)
+
+metabolite_meta = read.csv("../data/metabolomics_summary/Final version AV data Jang Murashige Lindeman by LL_logFC.csv") %>%
+  dplyr::select(pathway, metabolite) %>%
+  mutate(pathway = fct_inorder(as.factor(pathway))) %>%
+  column_to_rownames("metabolite")
+
+sample_meta = read.csv("../data/metabolomics_summary/sample_meta.csv") %>%
+  mutate(species = as.factor(species),
+         organ = as.factor(organ)) %>%
+  column_to_rownames("sample")
+```
+
+
+# Figure 1
+```{r}
+significance_data = stats_data %>%
+  mutate(across(everything(), ~na_if(., 0))) %>%
+  mutate(across(everything(), ~ case_when(
+    . == 1 | . == -1 ~ "\u00B7",
+    TRUE ~ as.character(.)
+  ))) %>%
+  mutate(across(everything(), ~ replace_na(., "")))
+
+# colour scale, centred on 0
+abs_max <- max(abs(as.matrix(logFC_data)), na.rm = TRUE)
+breaks <- c(seq(-abs_max, abs_max, length.out=11))
+colours <- rev(brewer.pal(11, "RdYlBu"))
+
+# gaps between pathways
+pathways <- metabolite_meta %>%
+  mutate(pathway_changes = cumsum(lag(pathway, default = as(pathway[1], class(pathway))) != pathway),
+    change_indicator = ifelse(lag(pathway_changes, default = 0) < pathway_changes, 1, 0))
+
+logFC_data %>%
+  pheatmap(clustering_method = "ward.D2",
+           cluster_rows = FALSE,
+           clustering_distance_rows = "euclidean",
+           cluster_cols = FALSE,
+           annotation_row = metabolite_meta,
+           fontsize_row = 6,
+           annotation_col = sample_meta %>% dplyr::select(-organ),
+           labels_col=sample_meta$organ,
+           na_col = "white",
+           display_numbers = significance_data,
+           fontsize_number = 12,
+           color = colours, 
+           breaks = breaks,
+         gaps_row = which(pathways$change_indicator == 1)-1) %>%
+  as.ggplot()
+
+ggsave("../results/plots/av_metabolomics_heatmap_all_values.pdf", width = 7, height = 9)
+
+```
+
+
+```{r}
+sessionInfo()
+```
+

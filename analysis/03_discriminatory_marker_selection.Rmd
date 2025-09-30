@@ -1,0 +1,157 @@
+---
+title: "Discrimatory marker selection"
+author: "John Mulvey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook: 
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: flatly
+    highlight: tango
+    toc_depth: 5
+---
+
+
+# Load packages
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(tidymodels)
+library(rpart.plot)
+library(stringr)
+library(ggplotify)
+```
+
+
+## Load and wrangle data
+```{r}
+log_tpm_tmm_goi = readRDS(file = "../results/log_tpm_tmm_goi.rds")
+sample_meta = readRDS(file = "../results/sample_meta.rds")
+log_tpm_grouped_tmm_goi = readRDS(file = "../results/log_tpm_grouped_tmm_goi.rds")
+
+selected_genes = read.csv("../data/curated_metabolic_pathways") %>%
+  dplyr::select(term = Pathway, gene = Gene) %>%
+  mutate(gene = str_trim(gene, side = "right"))
+
+metabolic_genes2 = log_tpm_tmm_goi %>%
+  rownames_to_column("ensembl_gene_id") %>%
+  filter(ensembl_gene_id %in% selected_genes$gene) %>%
+  column_to_rownames("ensembl_gene_id") %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("SAMPID") %>%
+  left_join(sample_meta %>% dplyr::select(SAMPID, tissue), by = "SAMPID", na_matches = "never")
+
+
+# filter for genes present in at least 75% of samples within each tissue
+gene_columns <- grep("ENSG", names(metabolic_genes2), value = TRUE)
+
+# Function to check if at least 75% of values are above the threshold
+above_threshold <- function(x, threshold) {
+  mean(x > threshold) >= 0.75
+}
+
+# Apply the function to each gene within each tissue group
+metabolic_genes2 <- metabolic_genes2 %>%
+  group_by(tissue) %>%
+  filter(across(all_of(gene_columns), ~above_threshold(., -20)))
+```
+
+
+## Preprocess
+```{r}
+set.seed(123)
+metabolic_genes_split <- initial_split(metabolic_genes2, strata = tissue)
+metabolic_genes_train <- training(metabolic_genes_split)
+metabolic_genes_test <- testing(metabolic_genes_split)
+
+# check stratified sampling
+metabolic_genes_test %>%
+  group_by(tissue) %>%
+  summarise(n = n())
+
+sample_meta %>%
+  group_by(tissue) %>%
+  summarise(n = n())
+
+metabolic_genes_trees_rec <- recipe(tissue ~ ., data = metabolic_genes_train) %>%
+  update_role(SAMPID, new_role = "ID") %>%
+  step_nzv(all_predictors()) %>%
+  themis::step_smote(tissue, seed = 456)
+
+metabolic_genes_trees_prep <- prep(metabolic_genes_trees_rec)
+metabolic_genes_trees_juiced <- juice(metabolic_genes_trees_prep)
+```
+
+
+## Decision trees
+### define workflow
+```{r}
+decision_trees_spec <- decision_tree(tree_depth = 5) %>%
+  set_mode("classification") %>%
+  set_engine("rpart")
+
+decision_trees_wf <- workflow() %>%
+  add_recipe(metabolic_genes_trees_rec) %>%
+  add_model(decision_trees_spec)
+
+decision_trees_res = decision_trees_wf %>%
+  last_fit(metabolic_genes_split)
+```
+
+
+### Examine results
+#### Confusion matrix
+```{r}
+decision_trees_res %>%
+  collect_metrics()
+
+decision_trees_res %>%
+  collect_predictions() %>%
+  conf_mat(tissue, .pred_class)
+```
+
+
+#### Plot decision trees
+```{r}
+decision_tree_fit <- decision_trees_wf %>% 
+   fit(metabolic_genes_train) %>%
+  pull_workflow_fit()
+
+
+rpart.plot(decision_tree_fit$fit)
+
+decision_tree_fit # print tree
+```
+
+
+#### plot gene expression per tissue, Figure S3A-C
+```{r}
+log_tpm_tmm_goi_long_sample = log_tpm_tmm_goi %>%
+  as.data.frame() %>%
+  rownames_to_column("ENSG") %>%
+  pivot_longer(!ENSG, names_to = "sample", values_to = "log_tpm_tmm") %>%
+  left_join(sample_meta, by = c("sample"="SAMPID"))
+
+discriminant_genes = c("ENSG00000143627", "ENSG00000151726", "ENSG00000130957")
+
+for (i in discriminant_genes){
+    print(log_tpm_tmm_goi_long_sample %>%
+      filter(str_detect(ENSG, i)) %>%
+      ggplot(aes(x = tissue, y = log_tpm_tmm, group = tissue)) +
+      geom_violin(fill = "darkgrey") +
+      ggtitle(paste0(i, " expression"))+
+    theme_grey() )
+  
+  ggsave(paste0("../results/plots/decision_tree_marker_", i, "_expression.pdf"))
+}
+```
+
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,624 @@
+---
+title: "GTEx transcriptomes: alignment to organ metabolic preferences"
+author: "John Mulvey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: flatly
+    highlight: tango
+  html_document:
+    toc: yes
+    df_print: paged
+---
+
+Normalisation between different tissues is challenging, particularly for sequencing data where high abundance transcripts end up contributing an overrepresentative number of reads. TMM ("trimmed mean of M values") normalisation was developed for exactly this purpose:
+- Robinson, M.D., Oshlack, A. A scaling normalization method for differential expression analysis of RNA-seq data. Genome Biol 11, R25 (2010). https://doi.org/10.1186/gb-2010-11-3-r25
+
+GTEx data is expressed as TPM and median normalised, which is less appropriate for our use case. Here I import a Gene TPM dataset downloaded from GTEx and use edgeR for TMM normalisation
+- GTEx V8 dbGaP Accession phs000424.v8.p2
+  - obtained from https://storage.googleapis.com/adult-gtex/bulk-gex/v8/rna-seq/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gct.gz
+
+#Load packages
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(data.table)
+library(edgeR)
+library(readxl)
+library(RColorBrewer)
+library(factoextra)
+library(FactoMineR)
+library(GGally)
+library(pheatmap)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+library(ggrepel)
+library(biomaRt)
+library(ggpointdensity)
+library(ggplotify)
+library(caret)
+```
+
+
+# read data
+## sample_meta
+```{r}
+# make readable tissue types and add phenotype (stored individually for each subj)
+sample_meta = read.delim("../data/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt") %>%
+  mutate(tissue = str_replace_all(SMTSD, "[^[:alnum:]]+", "_") %>%
+           str_replace("[:punct:]$", "") %>%
+           as.factor()) %>%
+  mutate(SUBJID = str_extract(SAMPID, pattern = "GTEX-[:alnum:]*(?=[:punct:])")) %>%
+  left_join(read.delim("../data/GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt"), by = "SUBJID")
+
+tissue_types = levels(sample_meta$tissue)
+
+tissues_of_interest = c("Kidney_Cortex", "Kidney_Medulla", "Muscle_Skeletal", "Heart_Left_Ventricle", "Liver") # "Heart_Atrial_Appendage",
+
+# pull IDs of relevant samples
+selected_sample_id = sample_meta %>%
+  filter(tissue %in% tissues_of_interest & # prespecified tissues
+           SMRIN > 7) %>% # RINA > 7
+  group_by(tissue) %>%
+  filter(n() >10) %>% # >10 samples per tissue
+  pull(SAMPID)
+```
+
+
+## gene read counts
+Base read.delim and tidyverse read_delim are unable to deal with the size of this dataset - producing out of memory errors, but data.table works. Need to read sample_meta first since we use it to specify what samples to load the gene reads for.
+## transcript
+```{r}
+# define subset of columns to load
+columns_to_load = read_delim("../data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gct", skip=2, n_max = 1) %>%
+  dplyr::select(any_of(selected_sample_id))
+
+#data.table fread as another alternative
+gene_reads_matrix = data.table::fread("../data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gct", skip=2, select = c("Name", "Description", colnames(columns_to_load))) %>%
+  dplyr::select(-Description) %>%
+  column_to_rownames("Name")
+```
+
+
+## Retrive gene information from biomart
+N.B bu taksing the diff between start position and end position we ignore splicing - since tpm divides gene lenth by 1*10^6 this effect should be small and so adequate for our purposes here
+```{r}
+#use biomart to get gene legnth
+ensg_genes = rownames(gene_reads_matrix)
+ensg_genes_clean = str_extract(ensg_genes, "[^\\.]+")
+
+mart <- useMart("ensembl", dataset="hsapiens_gene_ensembl")
+#possible_attributes = listAttributes(mart = mart)
+
+human_gene_info = biomaRt::getBM(mart = mart, attributes = c("ensembl_gene_id", "hgnc_symbol", "start_position", "end_position", "description", "transcript_biotype", "chromosome_name")) %>%
+  mutate(gene_length = end_position - start_position) %>% 
+  filter(ensembl_gene_id %in% ensg_genes_clean) %>%
+  filter(!duplicated(ensembl_gene_id))
+
+# construct gene info dataframe
+gene_info = gene_reads_matrix %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  dplyr::select("GTEx_ENSG") %>%
+  mutate(ensembl_gene_id = str_extract(GTEx_ENSG, "[^\\.]+")) %>%
+  left_join(human_gene_info, by = "ensembl_gene_id")
+
+# check for duplicate genes
+n_occur <- data.frame(table(gene_info$GTEx_ENSG))
+n_occur[n_occur$Freq > 1,]
+
+n_occur <- data.frame(table(human_gene_info$ensembl_gene_id))
+n_occur[n_occur$Freq > 1,]
+```
+
+
+```{r}
+# protein coding genes
+protein_coding_genes = gene_info %>%
+  filter(transcript_biotype == "protein_coding") %>%
+  pull(ensembl_gene_id)
+```
+
+
+# number of samples of each tissue
+```{r}
+sample_meta = sample_meta %>%
+  dplyr::filter(SAMPID %in% colnames(gene_reads_matrix)) %>%
+  droplevels()
+
+sample_meta %>%
+  group_by(tissue) %>%
+  summarise(n = n())
+```
+
+
+# Filter lowly expressed genes
+"by group" collaspes groups into just one representative sample
+otherwise leaves all samples as one would expect
+```{r}
+groups = sample_meta %>%
+  filter(SAMPID %in% colnames(gene_reads_matrix)) %>%
+  pull(tissue) %>%
+  droplevels()
+
+dgelist = DGEList(counts = gene_reads_matrix,
+                    group = groups,
+                  genes = gene_info)
+
+# filter lowly-expressed genes
+to_keep = filterByExpr(dgelist, group = groups)
+table(to_keep)
+
+dgelist = dgelist[to_keep, , keep.lib.sizes=FALSE]
+```
+
+
+# Normalise
+TMM noramlisation paper: [@robinson_2010]
+```{r}
+dgelist = calcNormFactors(dgelist, method = "TMM")
+```
+
+
+# calculate TPM
+## grouper per tissue
+TPM calc confirmed correct by gordon symthe: https://www.biostars.org/p/388584/ 
+```{r}
+#TMM
+rpkm_grouped_tmm = edgeR::rpkmByGroup(dgelist, log=F, gene.length = dgelist$genes$gene_length) %>%
+  na.omit()
+tpm_grouped_tmm = t(t(rpkm_grouped_tmm) / colSums(rpkm_grouped_tmm) ) * 1e6
+
+#naive
+rpkm_grouped_naive = edgeR::rpkmByGroup(dgelist, log=F, gene.length = dgelist$genes$gene_length) %>%
+  na.omit()
+tpm_grouped_naive = t(t(rpkm_grouped_naive) / colSums(rpkm_grouped_naive) ) * 1e6
+
+#log2
+log_tpm_grouped_tmm = log2(tpm_grouped_tmm + 1e-6) %>%
+  as.data.frame()
+
+```
+
+
+## ungrouped
+Note that edgeR::rpkm() uses the _normalised_ effective library sizes and not the raw ones - hence we have taken into account the TMM normalisation
+```{r}
+#TMM
+rpkm_tmm <- edgeR::rpkm(dgelist, log=F, gene.length = dgelist$genes$gene_length) %>%
+  na.omit()
+
+tpm_tmm <- t(t(rpkm_tmm) / colSums(rpkm_tmm)) * 1e6
+
+#log2
+log_tpm_tmm = log2(tpm_tmm + 1e-6) %>%
+  as.data.frame()
+```
+
+
+# Load Predefined Metabolic Gene Sets
+```{r}
+#updated file from Marleen with a few more genes added
+genes_of_interest = read_excel("../data/HumanGEM_gene_list.xlsx", "HumanGem NoDupl") %>%
+  dplyr::rename(ensembl_gene_id = HumanGem_ENSG) %>%
+  dplyr::select(Cluster, ensembl_gene_id)
+
+#ensure correct genes_of_interest is specified below
+metabolic_genes_tpm = tpm_grouped_tmm[, colnames(tpm_grouped_tmm) %in% tissues_of_interest] %>%
+  na.omit() %>%
+  as.data.frame() %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(gene_info, by = "GTEx_ENSG") %>%
+  dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG, -description) %>%
+  right_join(genes_of_interest, by = "ensembl_gene_id")
+
+write.csv(metabolic_genes_tpm, "../results/data/tpm_grouped_by_tissue_specifed_genes_only.csv")
+```
+
+
+# filter genes
+## genes of interest
+```{r}
+#filter for predefined metabolism relevant genes
+log_tpm_tmm_goi = log_tpm_tmm %>%
+  as.data.frame() %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(gene_info, by = "GTEx_ENSG") %>%
+  dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG, -description, -transcript_biotype, -chromosome_name) %>%
+  right_join(genes_of_interest, by = "ensembl_gene_id") %>%
+  dplyr::select(-hgnc_symbol, -Cluster) %>%
+  column_to_rownames("ensembl_gene_id") %>%
+  na.omit()
+
+log_tpm_grouped_tmm_goi = log_tpm_grouped_tmm %>%
+  as.data.frame() %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(gene_info, by = "GTEx_ENSG") %>%
+  dplyr::select(-start_position, -end_position, -gene_length, -GTEx_ENSG, -description, -transcript_biotype, -chromosome_name) %>%
+  right_join(genes_of_interest, by = "ensembl_gene_id") %>%
+  column_to_rownames("ensembl_gene_id") %>%
+  dplyr::select(-hgnc_symbol, -Cluster)
+```
+
+
+# PCA
+## Figure 3A-B
+```{r}
+res_pca_goi = PCA(t(log_tpm_tmm_goi), scale.unit=TRUE, ncp=50, graph=F)
+
+# Figure 3A, PC1 vs PC2
+fviz_pca_ind(res_pca_goi,
+             axes = c(1,2),
+             habillage = sample_meta$tissue,
+             label = "none", #"ind" to show, with optional
+             repel = TRUE,
+             #addEllipses=TRUE, ellipse.level=0.95,
+             legend.title = "Tissue",
+             title = "Metabolic genes, PC1 vs PC2",
+             invisible="quali",
+             ggtheme = theme_gray())
+
+ggsave("../results/plots/PCA_metabolic_genes_1_vs_2.pdf")
+
+
+# Figure 3A, PC1 vs PC3
+fviz_pca_ind(res_pca_goi,
+             axes = c(1,3),
+             habillage = sample_meta$tissue,
+             label = "none", #"ind" to show, with optional
+             repel = TRUE,
+             #addEllipses=TRUE, ellipse.level=0.95,
+             legend.title = "Tissue",
+             title = "Metabolic genes, PC1 vs PC3",
+             invisible="quali",
+             ggtheme = theme_gray())
+
+ggsave("../results/plots/PCA_metabolic_genes_1_vs_3.pdf")
+
+```
+
+
+## Figure S1A-B
+```{r}
+# Figure s1A, percentage variance explained
+fviz_screeplot(res_pca_goi, ncp=10,
+               geom = "bar",
+               addlabels = TRUE,
+               ggtheme = theme_minimal()) +
+  theme(plot.title = element_blank())
+
+ggsave("../results/plots/PCA_metabolic_genes_scree_plot.pdf")
+
+
+# Figure S1B, pairwise scatterplots across first 5 PCs
+res_pca_goi[["ind"]][["coord"]] %>%
+  as.data.frame() %>%
+  dplyr::select(1:5) %>%
+  ggpairs(ggplot2::aes(colour=sample_meta$tissue),
+          lower = list(continuous = wrap("points", size=0.1)),
+          upper = list(continuous = wrap("cor", size = 2)),
+          progress = FALSE) +
+  theme_bw()
+
+ggsave("../results/plots/PCa_metabolic_genes_scatterplot_first_5.pdf")
+```
+
+
+### stability analysis (5-Fold Cross-Validation)
+```{r}
+data_for_pca <- t(log_tpm_tmm_goi) 
+
+# create 5 folds, stratified by tissue
+set.seed(123) 
+folds <- createFolds(sample_meta$tissue, k = 5, list = TRUE, returnTrain = TRUE)
+
+
+# Loop through each fold
+list_of_coords <- list()
+
+for (i in 1:length(folds)) {
+  # Get the "training" data for this fold
+  train_indices <- folds[[i]]
+  train_data <- data_for_pca[train_indices, ]
+  
+  # Run PCA on the subset
+  res_pca_fold <- PCA(train_data, scale.unit = TRUE, ncp = 5, graph = FALSE)
+  
+  # align PCs, in case of signs are flipped
+  coords_fold <- as.data.frame(res_pca_fold$ind$coord[, 1:3])
+  
+  for (pc in 1:3) {
+    common_samples <- intersect(rownames(data_for_pca), rownames(train_data))
+    cor_val <- cor(res_pca_goi$ind$coord[common_samples, pc], 
+                   coords_fold[common_samples, pc])
+    if (cor_val < 0) {
+      coords_fold[, pc] <- coords_fold[, pc] * -1
+    }
+  }
+  
+  # Add metadata and store the aligned coordinates
+  coords_fold$Sample <- rownames(coords_fold)
+  coords_fold$Fold <- paste0("Fold", i)
+  list_of_coords[[i]] <- coords_fold
+}
+
+# Combine all results into a single data frame
+all_coords <- bind_rows(list_of_coords) %>%
+  left_join(sample_meta, by = c("Sample" = "SAMPID"))
+```
+
+
+#### Figure S2A-B
+```{r}
+# Figure S2A, density plots of PC1 vs PC2 across 5 folds
+ggplot(all_coords, aes(x = Dim.1, y = Dim.2, color = tissue)) +
+  geom_density_2d(alpha = 0.8) +
+  facet_wrap(~Fold) + 
+  labs(
+    title = "Stability of PCA Structure across 5 Folds, PC1 vs PC2",
+    x = "Principal Component 1",
+    y = "Principal Component 2"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggsave("../results/plots/pca_structure_sensitivity_density_1_2.pdf", width = 7, height = 5)
+
+# Figure S2A, density plots of PC1 vs PC3 across 5 folds
+ggplot(all_coords, aes(x = Dim.1, y = Dim.3, color = tissue)) +
+  geom_density_2d(alpha = 0.8) +
+  facet_wrap(~Fold) + 
+  labs(
+    title = "Stability of PCA Structure across 5 Folds, PC1 vs PC3",
+    x = "Principal Component 1",
+    y = "Principal Component 3"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggsave("../results/plots/pca_structure_sensitivity_density_1_3.pdf", width = 7, height = 5)
+```
+
+
+# Differential expression
+## fit model
+```{r}
+#design matrix
+design = model.matrix(~ 0 + tissue, data = sample_meta) # + SMNABTCH + SMGEBTCH,
+colnames(design) = colnames(design) %>%
+  str_replace_all(" ", "") %>%
+  str_replace_all("tissue", "") %>%
+  str_replace_all("-", "_")
+
+y = estimateDisp(dgelist, design, verbose = TRUE, 
+                 tagwise = TRUE,
+                 tol=1e-12)
+```
+
+
+## Genes differentially expressed between tissues
+```{r}
+pval_threshold  = 0.01
+logFC_threshold = 2
+
+fit = glmQLFit(y, design)
+
+# contrat matrix to explicitly state pairwaise comparisons
+contrasts <- makeContrasts(
+  Heart_Left_Ventricle - Kidney_Cortex,
+  Heart_Left_Ventricle - Liver,
+  Heart_Left_Ventricle - Muscle_Skeletal,
+  Kidney_Cortex - Liver,
+  Kidney_Cortex - Muscle_Skeletal,
+  Liver - Muscle_Skeletal,
+  levels=colnames(design))
+
+
+qlf = glmQLFTest(fit, contrast = contrasts, poisson.bound	= TRUE)
+
+sig_anova = qlf$table %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  left_join(qlf$genes, by = "GTEx_ENSG") %>%
+  mutate(adj_PValue = p.adjust(PValue, method = "BH")) %>%
+  filter(str_detect(ensembl_gene_id, paste(protein_coding_genes, collapse = "|"))) %>%
+  filter(adj_PValue < pval_threshold) %>%
+  filter(if_any(contains("logFC"), ~ . > logFC_threshold))
+```
+
+
+### heatmap, Figure 3C
+```{r}
+# metabolic genes only
+log_tpm_tmm_grouped_sig_anova_goi = log_tpm_grouped_tmm_goi %>%
+  rownames_to_column("GTEx_ENSG") %>%
+  filter(GTEx_ENSG %in% sig_anova$ensembl_gene_id) %>%
+  column_to_rownames("GTEx_ENSG")
+
+#plot heatmap
+pathways <- metabolic_genes_tpm$Cluster %>%
+  as.factor() %>%
+  levels()
+
+# create object to store ordering of genes
+goi_order <- data.frame(pathway = character(), ensembl_gene_id = character(), stringsAsFactors = FALSE)
+
+# Calc row order to heatmap
+for (pathway in pathways) {
+  # Get genes of the current pathway
+  genes_of_pathway <- metabolic_genes_tpm %>%
+    filter(Cluster == pathway &
+             ensembl_gene_id %in% rownames(log_tpm_tmm_grouped_sig_anova_goi)) %>%
+    dplyr::pull(ensembl_gene_id)
+  
+  # Subset the expression data for the current pathway
+  expression_of_genes <- log_tpm_tmm_grouped_sig_anova_goi [rownames(log_tpm_tmm_grouped_sig_anova_goi ) %in% genes_of_pathway, ] %>%
+    drop_na() %>%
+    t() %>% 
+    scale() %>% 
+    t()
+  
+  # Create dissimilarity matrix using Euclidean distance
+  distance_matrix <- dist(expression_of_genes, method = "euclidean") 
+  
+  # Perform hierarchical clustering
+  hclust_result <- hclust(distance_matrix, method = "ward.D2")
+  
+  ordered_expression <- expression_of_genes[hclust_result$order, ]
+  
+  # store gene order based upon expression profile
+  ordered_df <- data.frame(pathway = pathway, ensembl_gene_id = rownames(ordered_expression), stringsAsFactors = FALSE)
+  
+  # Append the ordered rows to goi_order
+  goi_order <- rbind(goi_order, ordered_df)
+}
+
+# plot
+goi_order <- goi_order %>%
+  mutate(pathway_changes = cumsum(lag(pathway, default = as(pathway[1], class(pathway))) != pathway),
+    change_indicator = ifelse(lag(pathway_changes, default = 0) < pathway_changes, 1, 0))
+
+pheat_inf_row = genes_of_interest %>%
+  column_to_rownames("ensembl_gene_id") %>%
+  dplyr::select(Cluster)
+
+# gene wise z-score
+log_tpm_tmm_grouped_sig_anova_goi[goi_order$ensembl_gene_id,] %>%
+  pheatmap(scale = "row",
+           clustering_method = "ward.D2",
+           cluster_rows = FALSE,
+           cluster_cols = TRUE,
+           clustering_distance_cols = "euclidean",
+           show_rownames = FALSE,
+           fontsize_col = 8,
+           angle_col = 0,
+           annotation_row = pheat_inf_row,
+           annotation_names_row = FALSE,
+           gaps_row = which(goi_order$change_indicator == 1)-1,
+           border_color = NA) %>%
+  as.ggplot() +
+  ggtitle("Metabolic genes significant in ANOVA averaged per tissue, z-score")
+
+ggsave("../results/plots/heatmap_genes_of_interest_sig_in_anova.pdf", width = 12)
+```
+
+
+## all pairwise comparisons
+### free memory
+```{r}
+rm(rpkm_tmm, tpm_tmm, gene_reads_matrix)
+```
+
+
+### calc, including GSEA
+```{r}
+tissues <- c("Heart_Left_Ventricle", "Kidney_Cortex", "Liver", "Muscle_Skeletal")
+
+#prep term2gene for custom metabolic comparisons
+term2gene = metabolic_genes_tpm %>%
+  mutate(Cluster = as.factor(Cluster)) %>%
+  dplyr::select(term = Cluster, gene = ensembl_gene_id)
+
+for (i in 1:(length(tissues)-1)) {
+  for (j in (i+1):length(tissues)) {
+    tissue1 <- tissues[i]
+    tissue2 <- tissues[j]
+    
+    # Lv vs kidney cortex
+    et_comparison <- exactTest(y, pair = c(tissue2, tissue1), dispersion = "trended")
+    
+    de_comparison <- decideTestsDGE(et_comparison, adjust.method = "BH", p.value = 0.05)
+    
+    results <- et_comparison$table %>%
+      rownames_to_column("GTEx_ENSG") %>%
+      left_join(et_comparison$genes, by = "GTEx_ENSG") %>%
+      mutate(adj_PValue = p.adjust(PValue, method = "BH"),
+             diffexpressed = case_when(adj_PValue  < pval_threshold & abs(logFC) > logFC_threshold ~ TRUE,
+                              TRUE ~ FALSE))
+    
+    assign(paste0(tissue1, "_", tissue2, "_edgeR_results"), results)
+    
+    # save differential testing results
+    results %>%
+      filter(ensembl_gene_id %in% metabolic_genes_tpm$ensembl_gene_id) %>%
+      dplyr::select(ensembl_gene_id, hgnc_symbol, logFC, PValue, adj_PValue, diffexpressed) %>%
+      write.csv(paste0("../results/data/differential_expression/edgeR_results_", tissue1, "_", tissue2, ".csv"))
+    
+    # GSEA custom metabolic pathways
+    ranked_genes <- results %>%
+      dplyr::select(logFC, ensembl_gene_id) %>%
+      group_by(ensembl_gene_id) %>%
+      summarise(logFC = mean(logFC)) %>%
+      arrange(desc(logFC)) %>%
+      pull(logFC, name = ensembl_gene_id)
+    
+    gse_metabolic <- GSEA(ranked_genes,
+                          TERM2GENE = term2gene,
+                          pvalueCutoff = 1,
+                          pAdjustMethod = "BH",
+                          minGSSize = 10,
+                          maxGSSize = 10000,
+                          by = "fgsea")
+    
+    gse_metabolic <- pairwise_termsim(gse_metabolic)
+    
+    assign(paste0(tissue1, "_", tissue2, "_gse_metabolic"), gse_metabolic)
+  }
+}
+```
+
+
+#### plot, Figure 4
+```{r}
+# Loop over each combination of tissues
+for (tissue1 in tissues) {
+  for (tissue2 in tissues) {
+    # Create the object name
+    object_name <- paste0(tissue1, "_", tissue2, "_gse_metabolic")
+    
+    # Check if the object exists
+    if (exists(object_name)) {
+      # Plotting code
+      plot_code <- paste0("plot_obj <- ", object_name, "@result %>%
+                          mutate(ID = fct_reorder(ID, NES)) %>%
+                          ggplot(aes(x = ID, y = NES)) +
+                          geom_col(aes(fill = ifelse(p.adjust < 0.05, 'p.adjust < 0.05', 'not significant'))) +
+                          coord_flip() +
+                          theme(legend.title = element_blank(),
+                                axis.title.y = element_blank()) +
+                          ggtitle('", tissue1, " vs ", tissue2, " \nenrichment of metabolic pathways')")
+      
+      # Evaluate the plotting code
+      eval(parse(text = plot_code))
+      
+      # Print the plot
+      print(plot_obj)
+      
+      # Save
+      file_name <- paste0("../results/plots/", object_name, ".pdf")
+      ggsave(plot_obj, file = file_name, width = 7, height = 5)
+      
+      write.csv(get(object_name), paste0("../results/data/", object_name, "_results.csv"))
+    }
+  }
+}
+```
+
+
+# save objects
+```{r}
+objects_to_save = list(sample_meta = sample_meta, 
+                    log_tpm_tmm_goi = log_tpm_tmm_goi,
+                    log_tpm_grouped_tmm_goi = log_tpm_grouped_tmm_goi)
+
+for(i in names(objects_to_save)){
+  saveRDS(objects_to_save[[i]], paste0("../results/", i, ".rds"))
+}
+```
+
+
+```{r}
+sessionInfo()
+```
+

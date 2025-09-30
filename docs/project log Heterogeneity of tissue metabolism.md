@@ -113,12 +113,36 @@ __________________________
 # entry_date:: Saturday, July 22nd 2023
 Had meeting with Jan and Lente, action points for me were:
 - [ ] write methods section for the bioinformatics parts
-- [ ] create a heatmap for Lente's AV metabolomics data summary
+- [x] create a heatmap for Lente's AV metabolomics data summary
 - [ ] GSEA plots
-	- [ ] liver vs muscle is a different width to the other plots
+	- [x] liver vs muscle is a different width to the other plots
 	- [ ] ?to create a patchwork with a single legend
 - [ ] Heatmap for discriminatory markers: double check that colour legend scale is correct
-- [ ] add decision tree plot to google drive, so that Lente can make an equivalent (but cleaner) version for the paper
+- [x] add decision tree plot to google drive, so that Lente can make an equivalent (but cleaner) version for the paper
+
+__________________________
+# entry_date:: Wednesday, August 16th 2023
+- [x] update AV metabolomics heatmap with
+	- [x] colour scale centred on 0
+	- [x] legend order the same as the order in which pathways appear
+
+??? Is it still worthwhile doing some analysis on the [[@wang_2019]] proteomic dataset? Since it would be nice to propose markers where changes are observed across both transcript and protein
+
+__________________________
+# entry_date:: Friday, February 7th 2025
+Overarching comments from the reviewers:
+- make clear the motivation of the study: to attempt to define practically measured markers applicable to ex vivo (inc in vitro) experimental settings that could verify that metabolism recapitulates tissue metabolism in vivo
+- more details in stats in main text
+- add number of genes and metabolites
+
+
+Comments for email
+- short title - to include "organ specific"
+- sorry to Jan re abstract
+- graphical abstract 
+	- remove "single cells" since we don't use any of this data
+	- "complexity of metabolic preference" in last panel to be "complexity of metabolic regualtion"?
+- changes to text - I've tried to make the rationale of the study more clear, since it seems we lost the reviewer from the start last time
 
 
 

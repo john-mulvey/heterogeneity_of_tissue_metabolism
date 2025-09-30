@@ -1,0 +1,80 @@
+﻿pathway,metabolite,leg_pig,leg_human,heart_pig,heart_human,kidney_pig,kidney_human,liver_pig
+Glycolysis,glucose,-1,-1,0,0,1,????,1
+Glycolysis,pyruvate,0,1,0,0,0,0,0
+Glycolysis,lactate,0,1,0,-1,-1,0,0
+Ketone,3-hydroxybutyrate (β-hydroxybutyrate),-1,-1,0,-1,-1,????,0
+Ketone ,acetoacetate,-1,-1,0,-1,-1,????,1
+TCA Cycle,aconitate,0,1,0,-1,-1,????,1
+TCA Cycle,a-ketoglutarate,1,0,0,0,-1,0,0
+TCA Cycle,citrate,1,1,0,0,-1,0,0
+TCA Cycle,fumarate,1,1,0,0,-1,0,-1
+TCA Cycle,malate,1,1,0,0,-1,0,-1
+TCA Cycle,succinate,1,1,0,1,-1,0,-1
+SCFA Ester,formate,0,???,0,???,0,????,0
+SCFA Ester,acetate,-1,-1,0,-1,0,????,-1
+SCFA Ester,propionate,-1,???,0,???,0,????,-1
+SCFA Ester,butyrate,0,-1,-1,0,0,????,-1
+SCFA Carnitine,butyryl carnitine or Isobutyryl carnitine C4,-1,0,0,0,-1,0,0
+SCFA Carnitine,isovaleryl carnitine C5,-1,1,0,0,-1,0,0
+SCFA Carnitine,tiglyl carnitine or methylcrotonyl carnitine C5:1,-1,0,0,0,0,0,0
+MCFA Carnitine,hexanoyl carnitine C6,0,-1,0,0,-1,0,0
+MCFA Carnitine,octanoyl carnitine C8,1,1,0,1,-1,-1,0
+MCFA Carnitine,decanoyl carnitine C10,1,1,0,1,-1,-1,0
+MCFA Carnitine,decenoyl carnitine C10:1,0,1,0,1,-1,-1,0
+MCFA Carnitine,lauroyl carnitine C12,1,0,0,0,-1,0,0
+MCFA Carnitine,dodecenoyl carnitine C12:1,1,0,-1,0,-1,-1,0
+LCFA Carnitine,myristoyl carnitine C14,0,-1,0,0,0,0,0
+LCFA Carnitine,tetradecenoyl carnitine C14:1,1,-1,-1,0,-1,0,0
+LCFA Carnitine,tetradecadienoyl carnitine C14:2,1,-1,-1,0,-1,0,-1
+LCFA Carnitine,palmitoyl carnitine C16,1,-1,0,0,0,0,0
+LCFA Carnitine,hexadecenoyl carnitine C16:1,1,0,0,0,-1,0,0
+LCFA Carnitine,stearoyl carnitine C18,0,-1,0,0,0,0,0
+LCFA Carnitine,oleyl carnitine C18:1,1,-1,0,0,0,????,0
+LCFA Carnitine,arachidoyl carnitine eicosanoyl carnitine C20,1,0,0,0,0,????,0
+LCFA,C14:0,0,1,-1,-1,0,????,0
+LCFA,C14:1,1,1,0,-1,0,????,-1
+LCFA,C14:2,0,1,0,1,0,????,-1
+LCFA,C15:0,0,1,0,0,-1,????,-1
+LCFA,C15:1,0,1,0,-1,0,????,-1
+LCFA,C16:0,0,0,-1,-1,0,????,-1
+LCFA,C16:1,0,1,-1,-1,0,????,-1
+LCFA,C16:2,0,1,0,-1,0,????,-1
+LCFA,C17:0,0,0,-1,0,0,????,0
+LCFA,C17:1,0,1,-1,-1,0,????,-1
+LCFA,C17:2,0,1,0,-1,0,????,-1
+LCFA,C18:0,0,-1,-1,0,0,????,0
+LCFA,C18:1,0,0,-1,-1,0,????,-1
+LCFA,C18:2,0,1,-1,-1,0,????,-1
+LCFA,C18:3,0,1,0,-1,0,????,-1
+LCFA,C18:4,0,1,0,0,0,????,0
+LCFA,C19:0,0,-1,-1,0,1,????,0
+LCFA,C19:1,0,0,-1,-1,0,????,0
+LCFA,C19:2,0,0,-1,0,0,????,0
+LCFA,C19:3,0,1,0,0,0,????,-1
+LCFA,C20:0,0,-1,0,-1,0,????,0
+LCFA,C20:1,0,-1,-1,-1,0,????,-1
+LCFA,C20:2,0,1,-1,-1,0,????,-1
+LCFA,C20:3,0,1,0,-1,0,????,-1
+LCFA,C20:4,1,1,0,-1,0,????,0
+VLCFA,C22:0,-1,-1,0,-1,0,????,0
+VLCFA,C22:1,0,-1,-1,-1,0,????,-1
+VLCFA,C22:2,0,-1,0,-1,0,????,-1
+VLCFA,C22:3,0,0,0,-1,0,????,-1
+VLCFA,C22:4,0,1,-1,-1,0,????,-1
+VLCFA,C22:5,1,1,0,-1,0,????,-1
+VLCFA,C22:6,0,1,0,-1,0,????,-1
+VLCFA,C23:0,0,0,0,0,0,????,0
+VLCFA,C23:1,0,0,0,0,0,????,0
+VLCFA,C24:0,-1,0,-1,0,0,????,0
+VLCFA,C24:1,0,-1,-1,0,0,????,0
+VLCFA,C24:2,0,-1,0,-1,0,????,0
+VLCFA,C24:3,0,0,0,0,0,????,0
+VLCFA,C24:4,0,0,0,0,0,????,0
+VLCFA,C24:5,0,0,0,-1,0,????,-1
+Amino acid,alanine,0,1,0,1,0,????,0
+Amino acid,aspartate,-1,0,0,0,-1,0,1
+BCAA,isoleucine,-1,1,0,-1,0,0,1
+BCAA,leucine,-1,1,0,-1,0,0,1
+BCAA,valine,-1,0,0,0,0,0,1
+Glutamate,glutamate,-1,-1,1,-1,-1,0,1
+Glutamine,glutamine,1,1,0,1,-1,0,0
